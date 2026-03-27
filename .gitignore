@@ -1,0 +1,14 @@
+.idea/
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+saves/
+players
+npc
+.pytest_tmp/
+pytest-cache-files-*/
+test-artifacts/
+*.egg-info/
+dist/
+build/

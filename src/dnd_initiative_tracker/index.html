@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DnD Initiative Tracker</title>
+<style>
+  :root {
+    --bg: #1a1a2e; --surface: #16213e; --card: #0f3460;
+    --accent: #e94560; --text: #eee; --muted: #888;
+    --green: #4ecca3; --yellow: #f0c040; --red: #e94560;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .container { max-width: 900px; margin: 0 auto; padding: 16px; }
+  h1 { text-align: center; color: var(--accent); margin-bottom: 8px; font-size: 1.6rem; }
+  h2 { color: var(--green); margin-bottom: 12px; font-size: 1.2rem; }
+  .subtitle { text-align: center; color: var(--muted); margin-bottom: 24px; }
+  .message { background: var(--surface); border-left: 3px solid var(--accent); padding: 8px 12px; margin-bottom: 16px; border-radius: 4px; min-height: 32px; }
+  button { background: var(--card); color: var(--text); border: 1px solid var(--muted); padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 0.9rem; }
+  button:hover { background: var(--accent); border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); }
+  button.green { background: var(--green); border-color: var(--green); color: #111; }
+  .btn-group { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  input, select { background: var(--surface); color: var(--text); border: 1px solid var(--muted); padding: 8px 12px; border-radius: 4px; font-size: 0.9rem; }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+  th { background: var(--card); padding: 8px 12px; text-align: left; font-size: 0.85rem; color: var(--muted); text-transform: uppercase; }
+  td { padding: 8px 12px; border-bottom: 1px solid #222; }
+  tr.active-turn { background: rgba(233,69,96,0.15); }
+  tr.selected { outline: 2px solid var(--accent); }
+  tr.downed td { text-decoration: line-through; color: var(--muted); opacity: 0.5; }
+  tr:hover { background: rgba(255,255,255,0.03); cursor: pointer; }
+  .hp-bar { display: inline-block; width: 60px; height: 8px; background: #333; border-radius: 4px; overflow: hidden; vertical-align: middle; margin-left: 6px; }
+  .hp-fill { height: 100%; border-radius: 4px; }
+  .detail-card { background: var(--surface); border-radius: 8px; padding: 16px; margin-top: 16px; }
+  .detail-card dt { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; }
+  .detail-card dd { margin-bottom: 8px; }
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
+  .modal { background: var(--surface); border-radius: 8px; padding: 24px; min-width: 340px; max-width: 90vw; }
+  .modal h3 { margin-bottom: 12px; color: var(--accent); }
+  .modal .field { margin-bottom: 12px; }
+  .modal label { display: block; color: var(--muted); font-size: 0.85rem; margin-bottom: 4px; }
+  .modal input, .modal select { width: 100%; }
+  .modal .btn-group { margin-top: 16px; justify-content: flex-end; }
+  .saves-list { list-style: none; }
+  .saves-list li { padding: 10px 16px; background: var(--surface); margin-bottom: 4px; border-radius: 4px; cursor: pointer; }
+  .saves-list li:hover { background: var(--card); }
+  .home-menu { display: flex; flex-direction: column; gap: 12px; max-width: 320px; margin: 40px auto; }
+  .home-menu button { padding: 16px; font-size: 1.1rem; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>DnD Initiative Tracker</h1>
+  <div class="subtitle" id="screenTitle">Home</div>
+  <div class="message" id="message"></div>
+  <div id="app">
+    <div class="home-menu">
+      <button class="primary" onclick="newEncounter()">New Encounter</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let state = { mode: 'home', message: '' };
+
+window.onerror = function(msg, src, line, col, err) {
+  document.getElementById('message').textContent = 'JS Error: ' + msg;
+};
+window.onunhandledrejection = function(e) {
+  document.getElementById('message').textContent = 'Error: ' + (e.reason?.message || e.reason || 'unknown');
+};
+
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + r.statusText);
+  return r.json();
+}
+
+async function load() {
+  try {
+    state = await api('GET', '/api/state');
+    render();
+  } catch (e) {
+    console.error('Failed to load state:', e);
+    document.getElementById('message').textContent = 'Error: ' + e.message;
+  }
+}
+
+function setMessage(msg) {
+  document.getElementById('message').textContent = msg || '';
+}
+
+function setTitle(title) {
+  document.getElementById('screenTitle').textContent = title;
+}
+
+function render() {
+  setMessage(state.message || '');
+  const app = document.getElementById('app');
+  if (state.mode === 'home') renderHome(app);
+  else if (state.mode === 'setup') renderSetup(app);
+  else if (state.mode === 'combat') renderCombat(app);
+}
+
+function renderHome(app) {
+  setTitle('Home');
+  const encounters = state.encounters || [];
+  let list = '';
+  if (encounters.length) {
+    list = '<h2>Saved Encounters</h2><ul class="saves-list">';
+    encounters.forEach(e => {
+      list += '<li onclick="resumeEncounter(\'' + e.encounter_id + '\')">'
+        + e.encounter_name + ' <span style="color:var(--muted)">(round ' + e.round + ')</span></li>';
+    });
+    list += '</ul>';
+  }
+  app.innerHTML = `
+    <div class="home-menu">
+      <button class="primary" onclick="newEncounter()">New Encounter</button>
+    </div>
+    ${list}`;
+}
+
+async function newEncounter() {
+  try {
+    setMessage('Loading...');
+    await api('POST', '/api/new-encounter');
+    await load();
+  } catch (e) { setMessage('Error: ' + e.message); }
+}
+
+async function resumeEncounter(encounterId) {
+  try {
+    setMessage('Loading...');
+    await api('POST', '/api/resume-encounter', { encounter_id: encounterId });
+    await load();
+  } catch (e) { setMessage('Error: ' + e.message); }
+}
+
+function renderSetup(app) {
+  setTitle('Setup | ' + (state.setup_encounter_name || 'New Encounter'));
+  const npcs = (state.npc_templates || []).map(t => t.name).join(', ') || '-';
+  const players = (state.player_templates || []).join(', ') || '-';
+  let rows = '';
+  (state.setup_combatants || []).forEach((c, i) => {
+    const hp = c.max_hp != null ? c.current_hp + '/' + c.max_hp : '-';
+    const ac = c.ac != null ? c.ac : '-';
+    const init = c.initiative_total != null ? c.initiative_total : '-';
+    const token = c.token_label || '-';
+    rows += '<tr onclick="selectSetup(' + i + ')" class="' + (i === state.selected_index ? 'selected' : '') + '">'
+      + '<td>' + init + '</td><td>' + token + '</td><td>' + c.display_name + '</td>'
+      + '<td>' + c.kind + '</td><td>' + hp + '</td><td>' + ac + '</td>'
+      + '<td><button onclick="event.stopPropagation();removeSetup(' + i + ')">X</button></td></tr>';
+  });
+  if (!rows) rows = '<tr><td colspan="7" style="color:var(--muted)">No combatants yet</td></tr>';
+
+  app.innerHTML = `
+    <div style="margin-bottom:12px;color:var(--muted)">NPC templates: ${npcs}<br>Player templates: ${players}</div>
+    <div class="btn-group">
+      <button onclick="showAddNpc()">Add NPC</button>
+      <button onclick="showAddPlayer()">Add Player</button>
+      <button onclick="rollNpc()">Roll NPC Initiative</button>
+      <button onclick="showEditName()">Encounter Name</button>
+      <button class="green" onclick="startEncounter()">Start Encounter</button>
+      <button onclick="goHome()">Back</button>
+    </div>
+    <table>
+      <thead><tr><th>Init</th><th>Token</th><th>Name</th><th>Type</th><th>HP</th><th>AC</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function selectSetup(i) {
+  await api('POST', '/api/select', { index: i });
+  await load();
+}
+
+async function removeSetup(i) {
+  await api('POST', '/api/remove-combatant', { index: i });
+  await load();
+}
+
+async function rollNpc() {
+  await api('POST', '/api/roll-npc');
+  await load();
+}
+
+async function goHome() {
+  await api('POST', '/api/go-home');
+  await load();
+}
+
+function showAddNpc() {
+  const templates = state.npc_templates || [];
+  const options = templates.map(t => '<option value="'+t.name+'" data-hp="'+t.hp+'" data-ac="'+t.ac+'">'+t.name+'</option>').join('');
+  const first = templates[0] || { hp: '', ac: '' };
+  showModal(`
+    <h3>Add NPC</h3>
+    <div class="field"><label>NPC Name</label>
+      <select id="mdl_npc_name" onchange="onNpcSelect()">${options}</select></div>
+    <div class="field"><label>HP</label><input id="mdl_npc_hp" type="number" value="${first.hp}" min="1"></div>
+    <div class="field"><label>AC</label><input id="mdl_npc_ac" type="number" value="${first.ac}" min="0"></div>
+    <div class="field"><label>Count</label><input id="mdl_npc_count" type="number" value="1" min="1"></div>
+    <div class="field"><label>Token Labels (comma-separated, optional)</label><input id="mdl_npc_labels" placeholder="B1,B2,B3"></div>
+    <div class="btn-group">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="primary" onclick="submitAddNpc()">Add</button>
+    </div>
+  `);
+}
+
+function onNpcSelect() {
+  const sel = document.getElementById('mdl_npc_name');
+  const opt = sel.options[sel.selectedIndex];
+  document.getElementById('mdl_npc_hp').value = opt.dataset.hp || '';
+  document.getElementById('mdl_npc_ac').value = opt.dataset.ac || '';
+}
+
+async function submitAddNpc() {
+  const name = document.getElementById('mdl_npc_name').value;
+  const count = parseInt(document.getElementById('mdl_npc_count').value) || 1;
+  const labels = document.getElementById('mdl_npc_labels').value;
+  const hpRaw = document.getElementById('mdl_npc_hp').value.trim();
+  const acRaw = document.getElementById('mdl_npc_ac').value.trim();
+  const hp = hpRaw ? parseInt(hpRaw) : null;
+  const ac = acRaw ? parseInt(acRaw) : null;
+  closeModal();
+  await api('POST', '/api/add-npc', { name, count, labels, hp, ac });
+  await load();
+}
+
+function showAddPlayer() {
+  const templates = (state.player_templates || []).map(n => '<option value="'+n+'">'+n+'</option>').join('');
+  const optNew = '<option value="">-- new player --</option>';
+  showModal(`
+    <h3>Add Player</h3>
+    <div class="field"><label>Player</label>
+      <select id="mdl_player_name" onchange="toggleNewPlayer()">${templates}${optNew}</select></div>
+    <div id="newPlayerFields" class="hidden">
+      <div class="field"><label>New Player Name</label><input id="mdl_new_player_name"></div>
+      <div class="field"><label>Initiative Bonus (optional)</label><input id="mdl_player_bonus" type="number"></div>
+    </div>
+    <div class="btn-group">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="primary" onclick="submitAddPlayer()">Add</button>
+    </div>
+  `);
+}
+
+function toggleNewPlayer() {
+  const sel = document.getElementById('mdl_player_name').value;
+  document.getElementById('newPlayerFields').classList.toggle('hidden', sel !== '');
+}
+
+async function submitAddPlayer() {
+  let name = document.getElementById('mdl_player_name').value;
+  let bonus = null;
+  if (!name) {
+    name = document.getElementById('mdl_new_player_name').value.trim();
+    const raw = document.getElementById('mdl_player_bonus').value.trim();
+    if (raw) bonus = parseInt(raw);
+  }
+  closeModal();
+  await api('POST', '/api/add-player', { name, initiative_bonus: bonus });
+  await load();
+}
+
+function showEditName() {
+  showModal(`
+    <h3>Encounter Name</h3>
+    <div class="field"><label>Name</label><input id="mdl_enc_name" value="${state.setup_encounter_name || ''}"></div>
+    <div class="btn-group">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="primary" onclick="submitEditName()">Set</button>
+    </div>
+  `);
+}
+
+async function submitEditName() {
+  const name = document.getElementById('mdl_enc_name').value.trim();
+  closeModal();
+  if (name) { await api('POST', '/api/set-encounter-name', { name }); await load(); }
+}
+
+async function startEncounter() {
+  const r = await api('POST', '/api/start-encounter');
+  if (r.need_rolls) {
+    await promptPlayerRolls(r.players);
+    return;
+  }
+  await load();
+}
+
+async function promptPlayerRolls(players) {
+  let html = '<h3>Player Initiative Rolls</h3>';
+  players.forEach((p, i) => {
+    html += '<div class="field"><label>' + p.name + ' (bonus ' + (p.bonus || 0) + ')</label>'
+      + '<input id="mdl_roll_' + i + '" type="number" placeholder="d20 roll"></div>';
+  });
+  html += '<div class="btn-group"><button onclick="closeModal()">Cancel</button>'
+    + '<button class="primary" onclick="submitRolls(' + players.length + ')">Start</button></div>';
+  showModal(html);
+}
+
+async function submitRolls(count) {
+  const rolls = [];
+  for (let i = 0; i < count; i++) {
+    const v = document.getElementById('mdl_roll_' + i).value.trim();
+    rolls.push(v ? parseInt(v) : null);
+  }
+  closeModal();
+  await api('POST', '/api/submit-rolls', { rolls });
+  await load();
+}
+
+function renderCombat(app) {
+  const enc = state.encounter;
+  if (!enc) { app.innerHTML = '<p>No active encounter.</p>'; return; }
+  setTitle('Combat | ' + enc.encounter_name + ' | Round ' + enc.round);
+  let rows = '';
+  (enc.combatants || []).forEach((c, i) => {
+    const isActive = i === enc.active_index;
+    const isSel = i === state.selected_index;
+    const isDowned = c.current_hp != null && c.current_hp <= 0;
+    const cls = (isActive ? 'active-turn ' : '') + (isSel ? 'selected ' : '') + (isDowned ? 'downed' : '');
+    const hp = c.max_hp != null ? c.current_hp + '/' + c.max_hp : '-';
+    const hpPct = c.max_hp ? Math.max(0, Math.min(100, (c.current_hp / c.max_hp) * 100)) : 0;
+    const hpColor = hpPct > 50 ? 'var(--green)' : hpPct > 25 ? 'var(--yellow)' : 'var(--red)';
+    const hpBar = c.max_hp != null ? '<div class="hp-bar"><div class="hp-fill" style="width:'+hpPct+'%;background:'+hpColor+'"></div></div>' : '';
+    const ac = c.ac != null ? c.ac : '-';
+    const init = c.initiative_total != null ? c.initiative_total : '-';
+    const token = c.token_label || '-';
+    const activeIcon = isActive ? '\u25B6 ' : '';
+    rows += '<tr class="' + cls + '" onclick="selectCombat(' + i + ')">'
+      + '<td>' + activeIcon + init + '</td><td>' + token + '</td><td>' + c.display_name + '</td>'
+      + '<td>' + hp + ' ' + hpBar + '</td><td>' + ac + '</td></tr>';
+  });
+
+  let detail = '';
+  if (enc.combatants && enc.combatants.length > 0) {
+    const sel = enc.combatants[state.selected_index] || enc.combatants[0];
+    detail = '<div class="detail-card"><dl>'
+      + '<dt>Name</dt><dd>' + sel.display_name + '</dd>'
+      + '<dt>Token</dt><dd>' + (sel.token_label || '-') + '</dd>'
+      + '<dt>Initiative</dt><dd>' + (sel.initiative_total != null ? sel.initiative_total : '-') + '</dd>'
+      + '<dt>HP</dt><dd>' + (sel.current_hp != null ? sel.current_hp : '-') + '/' + (sel.max_hp != null ? sel.max_hp : '-') + '</dd>'
+      + '<dt>AC</dt><dd>' + (sel.ac != null ? sel.ac : '-') + '</dd>'
+      + '<dt>Notes</dt><dd>' + (sel.notes || '-') + '</dd>'
+      + '</dl></div>';
+  }
+
+  app.innerHTML = `
+    <div class="btn-group">
+      <button class="primary" onclick="nextTurn()">Next Turn</button>
+      <button onclick="showHpDelta()">HP +/-</button>
+      <button onclick="saveEncounter()">Save</button>
+      <button onclick="goHome()">Back</button>
+    </div>
+    <table>
+      <thead><tr><th>Init</th><th>Token</th><th>Name</th><th>HP</th><th>AC</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${detail}`;
+}
+
+async function selectCombat(i) {
+  await api('POST', '/api/select', { index: i });
+  await load();
+}
+
+async function nextTurn() {
+  await api('POST', '/api/next-turn');
+  await load();
+}
+
+async function saveEncounter() {
+  await api('POST', '/api/save');
+  await load();
+}
+
+function showHpDelta() {
+  const enc = state.encounter;
+  if (!enc || !enc.combatants.length) return;
+  const c = enc.combatants[state.selected_index];
+  if (c.current_hp == null) { setMessage(c.display_name + ' does not track HP.'); return; }
+  showModal(`
+    <h3>HP Delta: ${c.display_name}</h3>
+    <p>Current HP: ${c.current_hp}/${c.max_hp || '-'}</p>
+    <div class="field"><label>Delta (negative = damage)</label><input id="mdl_hp_delta" type="number" value="-1"></div>
+    <div class="btn-group">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="primary" onclick="submitHpDelta()">Apply</button>
+    </div>
+  `);
+}
+
+async function submitHpDelta() {
+  const delta = parseInt(document.getElementById('mdl_hp_delta').value) || 0;
+  closeModal();
+  await api('POST', '/api/hp-delta', { index: state.selected_index, delta });
+  await load();
+}
+
+function showModal(html) {
+  let overlay = document.getElementById('modalOverlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'modalOverlay';
+    overlay.className = 'modal-overlay';
+    document.body.appendChild(overlay);
+  }
+  overlay.innerHTML = '<div class="modal">' + html + '</div>';
+  overlay.classList.remove('hidden');
+}
+
+function closeModal() {
+  const overlay = document.getElementById('modalOverlay');
+  if (overlay) overlay.classList.add('hidden');
+}
+
+render();
+load();
+</script>
+</body>
+</html>
