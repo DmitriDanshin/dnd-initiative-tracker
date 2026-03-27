@@ -1,16 +1,25 @@
 # DnD Initiative Tracker
 
-Local keyboard-only TUI application for a DM who wants to track initiative, NPC stats, player initiative, token labels like `B1/B2/B3`, and the current state of a fight.
+Local FastAPI web server for tracking DnD encounters with markdown-backed NPC/player templates and saved combat state.
 
 ## Features
 
+- FastAPI backend with a bundled single-page web UI
 - NPC templates in `npc/*.md`
 - Player templates in `players/*.md`
 - Optional player combat stats
 - Automatic NPC initiative based on DnD Dexterity rules
-- Step-by-step player initiative entry before combat starts
-- Saved encounters in `saves/*.md`
-- Primitive fullscreen TUI built with `prompt_toolkit`
+- Manual player initiative entry before combat starts
+- Encounter saves in `saves/*.md`
+- Autosave and last-encounter restore
+- HP tracking, AC display, token labels like `B1/B2/B3`, and turn order management
+
+## Project layout
+
+- `src/dnd_initiative_tracker/app.py` contains the FastAPI app and encounter state logic
+- `src/dnd_initiative_tracker/index.html` contains the bundled frontend
+- `src/dnd_initiative_tracker/storage.py` reads and writes markdown data
+- `npc/`, `players/`, and `saves/` are created automatically in the working directory
 
 ## Markdown formats
 
@@ -54,7 +63,7 @@ notes: Shield user
 
 ### `saves/*.md`
 
-The application writes encounter state there automatically. Token labels like `B1` belong to the saved encounter, not to the NPC template.
+The application writes encounter state there automatically. Token labels belong to the saved encounter, not to the NPC template.
 
 ## Run
 
@@ -64,10 +73,18 @@ Install dependencies:
 uv sync
 ```
 
-Run the TUI:
+Start the web server:
 
 ```powershell
 uv run dnd-initiative-tracker
+```
+
+The server listens on `http://127.0.0.1:8000`.
+
+Open the UI in a browser:
+
+```text
+http://127.0.0.1:8000
 ```
 
 Run tests:
@@ -76,27 +93,32 @@ Run tests:
 uv run pytest
 ```
 
-## Current workflow
+## Web workflow
 
 1. Create or edit NPC markdown files in `npc/`
 2. Create players in `players/` or add them from the setup screen
-3. Start a new encounter
-4. Add NPCs with optional token labels like `B1,B2,B3`
-5. Add players
-6. Roll NPC initiative
-7. Enter player initiative one by one
-8. Track turns and HP in the combat screen
+3. Open `http://127.0.0.1:8000`
+4. Start a new encounter or resume a saved one
+5. Add NPCs with optional token labels like `B1,B2,B3`
+6. Add players
+7. Roll NPC initiative
+8. Enter player initiative rolls
+9. Track turns, HP, and save state from the combat screen
 
-## Controls
+## HTTP endpoints
 
-- `n` new encounter from home, `n` next turn in combat
-- `r` resume from home, `r` roll NPC initiative in setup
-- `j` / `k` move selection
-- `a` add NPC in setup
-- `p` add player in setup
-- `e` rename encounter in setup
-- `Enter` start encounter or load save
-- `Backspace` remove selected combatant in setup
-- `d` apply HP delta in combat
-- `s` save encounter in combat
-- `q` go back home, or quit from home
+- `GET /` returns the bundled web UI
+- `GET /api/state` returns current application state
+- `POST /api/new-encounter` starts setup mode
+- `POST /api/resume-encounter` loads a saved encounter
+- `POST /api/set-encounter-name` renames the setup encounter
+- `POST /api/add-npc` adds NPC combatants
+- `POST /api/add-player` adds a player combatant
+- `POST /api/roll-npc` rolls initiative for NPCs
+- `POST /api/remove-combatant` removes a setup combatant
+- `POST /api/select` changes selected combatant
+- `POST /api/start-encounter` starts combat or requests player rolls
+- `POST /api/submit-rolls` submits player initiative rolls
+- `POST /api/next-turn` advances the active combatant
+- `POST /api/hp-delta` applies healing or damage
+- `POST /api/save` writes the current encounter to `saves/`
