@@ -229,6 +229,87 @@ class DndInitiativeTrackerApp:
         self.message = f"Saved player template {template.name}."
         self.field_errors = {}
 
+    def get_npc_template(self, name: str) -> dict | None:
+        template = self.repository.load_npc_template_by_name(name)
+        if template is None:
+            return None
+        return template.model_dump()
+
+    def get_player_template(self, name: str) -> dict | None:
+        template = self.repository.load_player_template_by_name(name)
+        if template is None:
+            return None
+        return template.model_dump()
+
+    def delete_npc_template(self, name: str) -> bool:
+        deleted = self.repository.delete_npc_template(name)
+        if deleted:
+            self.message = f"Deleted NPC template '{name}'."
+        else:
+            self.message = f"NPC template '{name}' not found."
+        self.field_errors = {}
+        return deleted
+
+    def delete_player_template(self, name: str) -> bool:
+        deleted = self.repository.delete_player_template(name)
+        if deleted:
+            self.message = f"Deleted player template '{name}'."
+        else:
+            self.message = f"Player template '{name}' not found."
+        self.field_errors = {}
+        return deleted
+
+    def add_npc_to_combat(
+        self,
+        name: str,
+        count: int,
+        labels_raw: str,
+        hp_override: int | None = None,
+        ac_override: int | None = None,
+    ) -> None:
+        if self.current_encounter is None:
+            self.message = "No active encounter."
+            return
+        npc_template = self.repository.load_npc_template_by_name(name)
+        if npc_template is None:
+            self.message = f"NPC '{name}' not found."
+            return
+        if count < 1:
+            self.message = "NPC count must be at least 1."
+            return
+        token_labels = [label.strip() for label in labels_raw.split(",") if label.strip()] if labels_raw else []
+        if token_labels and len(token_labels) != count:
+            self.message = "Token label count must match NPC count."
+            return
+        combatants = self.current_encounter.combatants
+        existing_count = sum(
+            1 for c in combatants if c.kind == "npc" and c.source_name == npc_template.name
+        )
+        effective_hp = hp_override if hp_override is not None else npc_template.hp
+        effective_ac = ac_override if ac_override is not None else npc_template.ac
+        for index in range(count):
+            max_hp = max(0, effective_hp)
+            combatant = Combatant(
+                kind="npc",
+                source_name=npc_template.name,
+                display_name=f"{npc_template.name} #{existing_count + index + 1}",
+                token_label=token_labels[index] if index < len(token_labels) else None,
+                ac=effective_ac,
+                max_hp=max_hp,
+                current_hp=max_hp,
+                dex=npc_template.dex,
+                initiative_bonus=npc_template.initiative_bonus,
+                notes=npc_template.notes,
+                sort_index=len(combatants),
+            )
+            assign_npc_initiative(combatant)
+            combatants.append(combatant)
+        self.current_encounter.combatants = sort_combatants_for_initiative(combatants)
+        self.selected_index = self.current_encounter.active_index
+        self.message = f"Added {count} {npc_template.name} to combat."
+        self.field_errors = {}
+        self._autosave()
+
     def roll_npc_initiative(self) -> None:
         npc_count = 0
         for combatant in self.setup_combatants:
@@ -416,6 +497,16 @@ def create_fastapi_app(root_path: Path | None = None) -> FastAPI:
             return RedirectResponse(url="/", status_code=307)
         return HTMLResponse(read_resource_text("combat.html"))
 
+    @app.get("/npcs", response_class=HTMLResponse)
+    async def npcs_page():
+        tracker.mode = "home"
+        return read_resource_text("npc-list.html")
+
+    @app.get("/players", response_class=HTMLResponse)
+    async def players_page():
+        tracker.mode = "home"
+        return read_resource_text("player-list.html")
+
     @app.get("/assets/app.js", response_class=PlainTextResponse)
     async def app_js():
         return PlainTextResponse(read_resource_text("app.js"), media_type="application/javascript")
@@ -468,6 +559,46 @@ def create_fastapi_app(root_path: Path | None = None) -> FastAPI:
         tracker.add_player(body["name"], body.get("initiative_bonus"))
         return JSONResponse(tracker.get_state())
 
+    @app.get("/api/npc-templates")
+    async def list_npc_templates():
+        templates = [t.model_dump() for t in tracker.repository.list_npc_templates()]
+        return JSONResponse({"templates": templates, "message": tracker.message})
+
+    @app.get("/api/npc-templates/{name}")
+    async def get_npc_template(name: str):
+        data = tracker.get_npc_template(name)
+        if data is None:
+            return JSONResponse({"error": f"NPC '{name}' not found."}, status_code=404)
+        return JSONResponse(data)
+
+    @app.delete("/api/npc-templates/{name}")
+    async def delete_npc_template(name: str):
+        deleted = tracker.delete_npc_template(name)
+        if not deleted:
+            return JSONResponse({"error": f"NPC '{name}' not found."}, status_code=404)
+        templates = [t.model_dump() for t in tracker.repository.list_npc_templates()]
+        return JSONResponse({"templates": templates, "message": tracker.message})
+
+    @app.get("/api/player-templates")
+    async def list_player_templates():
+        templates = [t.model_dump() for t in tracker.repository.list_player_templates()]
+        return JSONResponse({"templates": templates, "message": tracker.message})
+
+    @app.get("/api/player-templates/{name}")
+    async def get_player_template(name: str):
+        data = tracker.get_player_template(name)
+        if data is None:
+            return JSONResponse({"error": f"Player '{name}' not found."}, status_code=404)
+        return JSONResponse(data)
+
+    @app.delete("/api/player-templates/{name}")
+    async def delete_player_template(name: str):
+        deleted = tracker.delete_player_template(name)
+        if not deleted:
+            return JSONResponse({"error": f"Player '{name}' not found."}, status_code=404)
+        templates = [t.model_dump() for t in tracker.repository.list_player_templates()]
+        return JSONResponse({"templates": templates, "message": tracker.message})
+
     @app.post("/api/save-npc-template")
     async def save_npc_template(request: Request):
         body = await request.json()
@@ -495,6 +626,18 @@ def create_fastapi_app(root_path: Path | None = None) -> FastAPI:
             initiative_bonus=body.get("initiative_bonus"),
             notes=body.get("notes", ""),
             markdown=body.get("markdown", ""),
+        )
+        return JSONResponse(tracker.get_state())
+
+    @app.post("/api/add-npc-to-combat")
+    async def add_npc_to_combat(request: Request):
+        body = await request.json()
+        tracker.add_npc_to_combat(
+            body["name"],
+            body.get("count", 1),
+            body.get("labels", ""),
+            hp_override=body.get("hp"),
+            ac_override=body.get("ac"),
         )
         return JSONResponse(tracker.get_state())
 

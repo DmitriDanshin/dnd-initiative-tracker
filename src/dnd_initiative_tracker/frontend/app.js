@@ -18,7 +18,16 @@ async function api(method, path, body) {
 
 async function load() {
   try {
-    state = await api("GET", "/api/state");
+    const page = currentPage();
+    if (page === "npcs") {
+      const data = await api("GET", "/api/npc-templates");
+      state = { mode: "npcs", npc_templates_full: data.templates, message: data.message || "" };
+    } else if (page === "players") {
+      const data = await api("GET", "/api/player-templates");
+      state = { mode: "players", player_templates_full: data.templates, message: data.message || "" };
+    } else {
+      state = await api("GET", "/api/state");
+    }
     render();
   } catch (error) {
     console.error("Failed to load state:", error);
@@ -76,6 +85,19 @@ function applyTemplateFieldErrors(fieldMap) {
 }
 
 function handleTemplateSaveResponse(response) {
+  const page = currentPage();
+  if (page === "npcs" || page === "players") {
+    if (response.field_errors && Object.keys(response.field_errors).length) {
+      state.message = response.message || "";
+      state.field_errors = response.field_errors;
+      setMessage(state.message);
+      applyTemplateFieldErrors(response.field_errors);
+      return;
+    }
+    closeModal();
+    load();
+    return;
+  }
   state = response;
   render();
   if (response.field_errors && Object.keys(response.field_errors).length) {
@@ -92,13 +114,15 @@ function render() {
   if (page === "home") renderHome(app);
   else if (page === "setup") renderSetup(app);
   else if (page === "combat") renderCombat(app);
+  else if (page === "npcs") renderNpcList(app);
+  else if (page === "players") renderPlayerList(app);
 }
 
 function renderHome(app) {
   setTitle("Home");
   const encounters = state.encounters || [];
-  const npcTemplates = (state.npc_templates || []).map((template) => escapeHtml(template.name)).join(", ") || "-";
-  const playerTemplates = (state.player_templates || []).map((name) => escapeHtml(name)).join(", ") || "-";
+  const npcCount = (state.npc_templates || []).length;
+  const playerCount = (state.player_templates || []).length;
   let list = "";
   if (encounters.length) {
     list = "<h2>Saved Encounters</h2><ul class=\"saves-list\">";
@@ -111,13 +135,8 @@ function renderHome(app) {
   app.innerHTML = `
     <div class="home-menu">
       <button class="primary" onclick="newEncounter()">New Encounter</button>
-      <button onclick="showCreateNpcTemplate()">Add NPC Template</button>
-      <button onclick="showCreatePlayerTemplate()">Add Player Template</button>
-    </div>
-    <div class="template-section">
-      <h2>Templates</h2>
-      <div class="template-list">NPC: ${npcTemplates}</div>
-      <div class="template-list">Players: ${playerTemplates}</div>
+      <button onclick="window.location.href='/npcs'">NPCs <span style="color:var(--muted)">(${npcCount})</span></button>
+      <button onclick="window.location.href='/players'">Players <span style="color:var(--muted)">(${playerCount})</span></button>
     </div>
     ${list}`;
 }
@@ -200,6 +219,7 @@ function renderCombat(app) {
     <div class="btn-group">
       <button class="primary" onclick="nextTurn()">Next Turn</button>
       <button onclick="showHpDelta()">HP +/-</button>
+      <button onclick="showAddNpcCombat()">Add NPC</button>
       <button onclick="saveEncounter()">Save</button>
       <button onclick="goHome()">Back</button>
     </div>
@@ -208,6 +228,311 @@ function renderCombat(app) {
       <tbody>${rows}</tbody>
     </table>
     ${detail}`;
+}
+
+// --- Add NPC during Combat ---
+
+function showAddNpcCombat() {
+  const templates = state.npc_templates || [];
+  if (!templates.length) {
+    showAddNpcCombatNewOnly();
+    return;
+  }
+  const options = templates.map((template) => {
+    return "<option value=\"" + escapeHtml(template.name) + "\" data-hp=\"" + template.hp + "\" data-ac=\"" + template.ac + "\">" + escapeHtml(template.name) + "</option>";
+  }).join("");
+  const first = templates[0] || { hp: "", ac: "" };
+  showModal(`
+    <h3>Add NPC to Combat</h3>
+    <div class="field"><label>NPC Template</label>
+      <select id="mdl_combat_npc_name" onchange="onCombatNpcSelect()">
+        ${options}
+        <option value="">-- create new --</option>
+      </select></div>
+    <div id="combatNpcExistingFields">
+      <div class="field"><label>HP</label><input id="mdl_combat_npc_hp" type="number" value="${first.hp}" min="1"></div>
+      <div class="field"><label>AC</label><input id="mdl_combat_npc_ac" type="number" value="${first.ac}" min="0"></div>
+      <div class="field"><label>Count</label><input id="mdl_combat_npc_count" type="number" value="1" min="1"></div>
+      <div class="field"><label>Token Labels (comma-separated, optional)</label><input id="mdl_combat_npc_labels" placeholder="B1,B2,B3"></div>
+    </div>
+    <div id="combatNpcNewFields" class="hidden">
+      <div class="field"><label>Name</label><input id="mdl_combat_new_npc_name" data-field-name="name"><div class="field-error" data-field-error="name"></div></div>
+      <div class="field"><label>AC</label><input id="mdl_combat_new_npc_ac" data-field-name="ac" type="number" min="0"><div class="field-error" data-field-error="ac"></div></div>
+      <div class="field"><label>HP</label><input id="mdl_combat_new_npc_hp" data-field-name="hp" type="number" min="0"><div class="field-error" data-field-error="hp"></div></div>
+      <div class="field"><label>DEX</label><input id="mdl_combat_new_npc_dex" data-field-name="dex" type="number"><div class="field-error" data-field-error="dex"></div></div>
+      <div class="field"><label>Initiative Bonus (optional)</label><input id="mdl_combat_new_npc_bonus" data-field-name="initiative_bonus" type="number"><div class="field-error" data-field-error="initiative_bonus"></div></div>
+      <div class="field"><label>Count</label><input id="mdl_combat_new_npc_count" type="number" value="1" min="1"></div>
+      <div class="field"><label>Token Labels (comma-separated, optional)</label><input id="mdl_combat_new_npc_labels" placeholder="B1,B2,B3"></div>
+    </div>
+    <div class="btn-group">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="primary" onclick="submitAddNpcCombat()">Add</button>
+    </div>
+  `);
+}
+
+function showAddNpcCombatNewOnly() {
+  showModal(`
+    <h3>Add NPC to Combat</h3>
+    <p style="color:var(--muted);margin-bottom:12px">No NPC templates yet. Create one:</p>
+    <div class="field"><label>Name</label><input id="mdl_combat_new_npc_name" data-field-name="name"><div class="field-error" data-field-error="name"></div></div>
+    <div class="field"><label>AC</label><input id="mdl_combat_new_npc_ac" data-field-name="ac" type="number" min="0"><div class="field-error" data-field-error="ac"></div></div>
+    <div class="field"><label>HP</label><input id="mdl_combat_new_npc_hp" data-field-name="hp" type="number" min="0"><div class="field-error" data-field-error="hp"></div></div>
+    <div class="field"><label>DEX</label><input id="mdl_combat_new_npc_dex" data-field-name="dex" type="number"><div class="field-error" data-field-error="dex"></div></div>
+    <div class="field"><label>Initiative Bonus (optional)</label><input id="mdl_combat_new_npc_bonus" data-field-name="initiative_bonus" type="number"><div class="field-error" data-field-error="initiative_bonus"></div></div>
+    <div class="field"><label>Count</label><input id="mdl_combat_new_npc_count" type="number" value="1" min="1"></div>
+    <div class="field"><label>Token Labels (comma-separated, optional)</label><input id="mdl_combat_new_npc_labels" placeholder="B1,B2,B3"></div>
+    <div class="btn-group">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="primary" onclick="submitAddNpcCombatNew()">Create & Add</button>
+    </div>
+  `);
+}
+
+function onCombatNpcSelect() {
+  const select = document.getElementById("mdl_combat_npc_name");
+  const isNew = select.value === "";
+  document.getElementById("combatNpcExistingFields").classList.toggle("hidden", isNew);
+  document.getElementById("combatNpcNewFields").classList.toggle("hidden", !isNew);
+  if (!isNew) {
+    const option = select.options[select.selectedIndex];
+    document.getElementById("mdl_combat_npc_hp").value = option.dataset.hp || "";
+    document.getElementById("mdl_combat_npc_ac").value = option.dataset.ac || "";
+  }
+}
+
+async function submitAddNpcCombat() {
+  const select = document.getElementById("mdl_combat_npc_name");
+  if (select && select.value === "") {
+    await submitAddNpcCombatNew();
+    return;
+  }
+  const name = select ? select.value : "";
+  const count = parseInt(document.getElementById("mdl_combat_npc_count").value, 10) || 1;
+  const labels = document.getElementById("mdl_combat_npc_labels").value;
+  const hp = parseOptionalInteger("mdl_combat_npc_hp");
+  const ac = parseOptionalInteger("mdl_combat_npc_ac");
+  closeModal();
+  await api("POST", "/api/add-npc-to-combat", { name, count, labels, hp, ac });
+  await load();
+}
+
+async function submitAddNpcCombatNew() {
+  clearModalValidation();
+  const name = document.getElementById("mdl_combat_new_npc_name").value.trim();
+  const ac = parseOptionalInteger("mdl_combat_new_npc_ac");
+  const hp = parseOptionalInteger("mdl_combat_new_npc_hp");
+  const dex = parseOptionalInteger("mdl_combat_new_npc_dex");
+  const initiative_bonus = parseOptionalInteger("mdl_combat_new_npc_bonus");
+  const count = parseInt(document.getElementById("mdl_combat_new_npc_count").value, 10) || 1;
+  const labels = document.getElementById("mdl_combat_new_npc_labels").value;
+
+  const saveResponse = await api("POST", "/api/save-npc-template", { name, ac, hp, dex, initiative_bonus, tags: "", notes: "" });
+  if (saveResponse.field_errors && Object.keys(saveResponse.field_errors).length) {
+    applyTemplateFieldErrors(saveResponse.field_errors);
+    setMessage(saveResponse.message || "Validation failed.");
+    return;
+  }
+  closeModal();
+  await api("POST", "/api/add-npc-to-combat", { name, count, labels, hp, ac });
+  await load();
+}
+
+// --- NPC List Page ---
+
+let selectedNpcName = null;
+
+function renderNpcList(app) {
+  setTitle("NPCs");
+  const templates = state.npc_templates_full || [];
+  let rows = "";
+  templates.forEach((t) => {
+    const isSelected = t.name === selectedNpcName;
+    rows += "<tr class=\"" + (isSelected ? "selected" : "") + "\" onclick=\"selectNpc('" + escapeHtml(t.name) + "')\">"
+      + "<td>" + escapeHtml(t.name) + "</td>"
+      + "<td>" + t.ac + "</td>"
+      + "<td>" + t.hp + "</td>"
+      + "<td>" + t.dex + "</td>"
+      + "<td>" + (t.initiative_bonus != null ? t.initiative_bonus : "-") + "</td>"
+      + "<td>" + escapeHtml((t.tags || []).join(", ") || "-") + "</td>"
+      + "</tr>";
+  });
+  if (!rows) rows = "<tr><td colspan=\"6\" style=\"color:var(--muted)\">No NPC templates yet</td></tr>";
+
+  let detail = "";
+  if (selectedNpcName) {
+    const t = templates.find((t) => t.name === selectedNpcName);
+    if (t) {
+      detail = "<div class=\"detail-card\"><dl>"
+        + "<dt>Name</dt><dd>" + escapeHtml(t.name) + "</dd>"
+        + "<dt>AC</dt><dd>" + t.ac + "</dd>"
+        + "<dt>HP</dt><dd>" + t.hp + "</dd>"
+        + "<dt>DEX</dt><dd>" + t.dex + "</dd>"
+        + "<dt>Initiative Bonus</dt><dd>" + (t.initiative_bonus != null ? t.initiative_bonus : "-") + "</dd>"
+        + "<dt>Tags</dt><dd>" + escapeHtml((t.tags || []).join(", ") || "-") + "</dd>"
+        + "<dt>Notes</dt><dd>" + escapeHtml(t.notes || "-") + "</dd>"
+        + "</dl>"
+        + "<div class=\"btn-group\" style=\"margin-top:12px\">"
+        + "<button onclick=\"showEditNpcTemplate('" + escapeHtml(t.name) + "')\">Edit</button>"
+        + "<button class=\"danger\" onclick=\"confirmDeleteNpc('" + escapeHtml(t.name) + "')\">Delete</button>"
+        + "</div></div>";
+    }
+  }
+
+  app.innerHTML = `
+    <div class="btn-group">
+      <button onclick="showCreateNpcTemplate()">Add NPC Template</button>
+      <button onclick="goHome()">Back</button>
+    </div>
+    <table>
+      <thead><tr><th>Name</th><th>AC</th><th>HP</th><th>DEX</th><th>Init Bonus</th><th>Tags</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${detail}`;
+}
+
+function selectNpc(name) {
+  selectedNpcName = selectedNpcName === name ? null : name;
+  render();
+}
+
+function showEditNpcTemplate(name) {
+  const templates = state.npc_templates_full || [];
+  const t = templates.find((t) => t.name === name);
+  if (!t) return;
+  showTemplateModal({
+    title: "Edit NPC Template",
+    modeKey: "npcTemplate",
+    formContent: `
+      <div class="field"><label>Name</label><input id="mdl_create_npc_name" data-field-name="name" value="${escapeHtml(t.name)}"><div class="field-error" data-field-error="name"></div></div>
+      <div class="field"><label>AC</label><input id="mdl_create_npc_ac" data-field-name="ac" type="number" min="0" value="${t.ac}"><div class="field-error" data-field-error="ac"></div></div>
+      <div class="field"><label>HP</label><input id="mdl_create_npc_hp" data-field-name="hp" type="number" min="0" value="${t.hp}"><div class="field-error" data-field-error="hp"></div></div>
+      <div class="field"><label>DEX</label><input id="mdl_create_npc_dex" data-field-name="dex" type="number" value="${t.dex}"><div class="field-error" data-field-error="dex"></div></div>
+      <div class="field"><label>Initiative Bonus (optional)</label><input id="mdl_create_npc_bonus" data-field-name="initiative_bonus" type="number" value="${t.initiative_bonus != null ? t.initiative_bonus : ""}"><div class="field-error" data-field-error="initiative_bonus"></div></div>
+      <div class="field"><label>Tags (comma-separated)</label><input id="mdl_create_npc_tags" data-field-name="tags" value="${escapeHtml((t.tags || []).join(", "))}"><div class="field-error" data-field-error="tags"></div></div>
+      <div class="field"><label>Notes</label><textarea id="mdl_create_npc_notes" data-field-name="notes">${escapeHtml(t.notes || "")}</textarea><div class="field-error" data-field-error="notes"></div></div>
+    `,
+    markdownPlaceholder: `---\nname: Goblin Boss\nac: 17\nhp: 45\ndex: 14\ninitiative_bonus: 2\ntags:\n  - goblinoid\nnotes: Boss of the ambush.\n---`,
+    submitAction: "submitCreateNpcTemplate()",
+  });
+}
+
+function confirmDeleteNpc(name) {
+  showModal(`
+    <h3>Delete NPC Template</h3>
+    <p>Are you sure you want to delete <strong>${escapeHtml(name)}</strong>?</p>
+    <div class="btn-group">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="danger" onclick="deleteNpcTemplate('${escapeHtml(name)}')">Delete</button>
+    </div>
+  `);
+}
+
+async function deleteNpcTemplate(name) {
+  closeModal();
+  const data = await api("DELETE", "/api/npc-templates/" + encodeURIComponent(name));
+  selectedNpcName = null;
+  state.npc_templates_full = data.templates;
+  state.message = data.message || "";
+  render();
+}
+
+// --- Player List Page ---
+
+let selectedPlayerName = null;
+
+function renderPlayerList(app) {
+  setTitle("Players");
+  const templates = state.player_templates_full || [];
+  let rows = "";
+  templates.forEach((t) => {
+    const isSelected = t.name === selectedPlayerName;
+    rows += "<tr class=\"" + (isSelected ? "selected" : "") + "\" onclick=\"selectPlayer('" + escapeHtml(t.name) + "')\">"
+      + "<td>" + escapeHtml(t.name) + "</td>"
+      + "<td>" + (t.ac != null ? t.ac : "-") + "</td>"
+      + "<td>" + (t.max_hp != null ? (t.current_hp != null ? t.current_hp : t.max_hp) + "/" + t.max_hp : "-") + "</td>"
+      + "<td>" + (t.dex != null ? t.dex : "-") + "</td>"
+      + "<td>" + (t.initiative_bonus != null ? t.initiative_bonus : "-") + "</td>"
+      + "</tr>";
+  });
+  if (!rows) rows = "<tr><td colspan=\"5\" style=\"color:var(--muted)\">No player templates yet</td></tr>";
+
+  let detail = "";
+  if (selectedPlayerName) {
+    const t = templates.find((t) => t.name === selectedPlayerName);
+    if (t) {
+      detail = "<div class=\"detail-card\"><dl>"
+        + "<dt>Name</dt><dd>" + escapeHtml(t.name) + "</dd>"
+        + "<dt>AC</dt><dd>" + (t.ac != null ? t.ac : "-") + "</dd>"
+        + "<dt>Max HP</dt><dd>" + (t.max_hp != null ? t.max_hp : "-") + "</dd>"
+        + "<dt>Current HP</dt><dd>" + (t.current_hp != null ? t.current_hp : "-") + "</dd>"
+        + "<dt>DEX</dt><dd>" + (t.dex != null ? t.dex : "-") + "</dd>"
+        + "<dt>Initiative Bonus</dt><dd>" + (t.initiative_bonus != null ? t.initiative_bonus : "-") + "</dd>"
+        + "<dt>Notes</dt><dd>" + escapeHtml(t.notes || "-") + "</dd>"
+        + "</dl>"
+        + "<div class=\"btn-group\" style=\"margin-top:12px\">"
+        + "<button onclick=\"showEditPlayerTemplate('" + escapeHtml(t.name) + "')\">Edit</button>"
+        + "<button class=\"danger\" onclick=\"confirmDeletePlayer('" + escapeHtml(t.name) + "')\">Delete</button>"
+        + "</div></div>";
+    }
+  }
+
+  app.innerHTML = `
+    <div class="btn-group">
+      <button onclick="showCreatePlayerTemplate()">Add Player Template</button>
+      <button onclick="goHome()">Back</button>
+    </div>
+    <table>
+      <thead><tr><th>Name</th><th>AC</th><th>HP</th><th>DEX</th><th>Init Bonus</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${detail}`;
+}
+
+function selectPlayer(name) {
+  selectedPlayerName = selectedPlayerName === name ? null : name;
+  render();
+}
+
+function showEditPlayerTemplate(name) {
+  const templates = state.player_templates_full || [];
+  const t = templates.find((t) => t.name === name);
+  if (!t) return;
+  showTemplateModal({
+    title: "Edit Player Template",
+    modeKey: "playerTemplate",
+    formContent: `
+      <div class="field"><label>Name</label><input id="mdl_create_player_name" data-field-name="name" value="${escapeHtml(t.name)}"><div class="field-error" data-field-error="name"></div></div>
+      <div class="field"><label>AC (optional)</label><input id="mdl_create_player_ac" data-field-name="ac" type="number" min="0" value="${t.ac != null ? t.ac : ""}"><div class="field-error" data-field-error="ac"></div></div>
+      <div class="field"><label>Max HP (optional)</label><input id="mdl_create_player_max_hp" data-field-name="max_hp" type="number" min="0" value="${t.max_hp != null ? t.max_hp : ""}"><div class="field-error" data-field-error="max_hp"></div></div>
+      <div class="field"><label>Current HP (optional)</label><input id="mdl_create_player_current_hp" data-field-name="current_hp" type="number" min="0" value="${t.current_hp != null ? t.current_hp : ""}"><div class="field-error" data-field-error="current_hp"></div></div>
+      <div class="field"><label>DEX (optional)</label><input id="mdl_create_player_dex" data-field-name="dex" type="number" value="${t.dex != null ? t.dex : ""}"><div class="field-error" data-field-error="dex"></div></div>
+      <div class="field"><label>Initiative Bonus (optional)</label><input id="mdl_create_player_bonus" data-field-name="initiative_bonus" type="number" value="${t.initiative_bonus != null ? t.initiative_bonus : ""}"><div class="field-error" data-field-error="initiative_bonus"></div></div>
+      <div class="field"><label>Notes</label><textarea id="mdl_create_player_notes" data-field-name="notes">${escapeHtml(t.notes || "")}</textarea><div class="field-error" data-field-error="notes"></div></div>
+    `,
+    markdownPlaceholder: `---\nname: Aramil\nac: 15\nmax_hp: 28\ncurrent_hp: 28\ndex: 16\ninitiative_bonus: 3\nnotes: Keeps Bless ready.\n---`,
+    submitAction: "submitCreatePlayerTemplate()",
+  });
+}
+
+function confirmDeletePlayer(name) {
+  showModal(`
+    <h3>Delete Player Template</h3>
+    <p>Are you sure you want to delete <strong>${escapeHtml(name)}</strong>?</p>
+    <div class="btn-group">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="danger" onclick="deletePlayerTemplate('${escapeHtml(name)}')">Delete</button>
+    </div>
+  `);
+}
+
+async function deletePlayerTemplate(name) {
+  closeModal();
+  const data = await api("DELETE", "/api/player-templates/" + encodeURIComponent(name));
+  selectedPlayerName = null;
+  state.player_templates_full = data.templates;
+  state.message = data.message || "";
+  render();
 }
 
 function newEncounter() {
@@ -239,18 +564,36 @@ async function rollNpc() {
 
 function showAddNpc() {
   const templates = state.npc_templates || [];
+  if (!templates.length) {
+    showAddNpcNewOnly();
+    return;
+  }
   const options = templates.map((template) => {
-    return "<option value=\"" + template.name + "\" data-hp=\"" + template.hp + "\" data-ac=\"" + template.ac + "\">" + template.name + "</option>";
+    return "<option value=\"" + escapeHtml(template.name) + "\" data-hp=\"" + template.hp + "\" data-ac=\"" + template.ac + "\">" + escapeHtml(template.name) + "</option>";
   }).join("");
   const first = templates[0] || { hp: "", ac: "" };
   showModal(`
     <h3>Add NPC</h3>
-    <div class="field"><label>NPC Name</label>
-      <select id="mdl_npc_name" onchange="onNpcSelect()">${options}</select></div>
-    <div class="field"><label>HP</label><input id="mdl_npc_hp" type="number" value="${first.hp}" min="1"></div>
-    <div class="field"><label>AC</label><input id="mdl_npc_ac" type="number" value="${first.ac}" min="0"></div>
-    <div class="field"><label>Count</label><input id="mdl_npc_count" type="number" value="1" min="1"></div>
-    <div class="field"><label>Token Labels (comma-separated, optional)</label><input id="mdl_npc_labels" placeholder="B1,B2,B3"></div>
+    <div class="field"><label>NPC Template</label>
+      <select id="mdl_npc_name" onchange="onNpcSelect()">
+        ${options}
+        <option value="">-- create new --</option>
+      </select></div>
+    <div id="setupNpcExistingFields">
+      <div class="field"><label>HP</label><input id="mdl_npc_hp" type="number" value="${first.hp}" min="1"></div>
+      <div class="field"><label>AC</label><input id="mdl_npc_ac" type="number" value="${first.ac}" min="0"></div>
+      <div class="field"><label>Count</label><input id="mdl_npc_count" type="number" value="1" min="1"></div>
+      <div class="field"><label>Token Labels (comma-separated, optional)</label><input id="mdl_npc_labels" placeholder="B1,B2,B3"></div>
+    </div>
+    <div id="setupNpcNewFields" class="hidden">
+      <div class="field"><label>Name</label><input id="mdl_setup_new_npc_name" data-field-name="name"><div class="field-error" data-field-error="name"></div></div>
+      <div class="field"><label>AC</label><input id="mdl_setup_new_npc_ac" data-field-name="ac" type="number" min="0"><div class="field-error" data-field-error="ac"></div></div>
+      <div class="field"><label>HP</label><input id="mdl_setup_new_npc_hp" data-field-name="hp" type="number" min="0"><div class="field-error" data-field-error="hp"></div></div>
+      <div class="field"><label>DEX</label><input id="mdl_setup_new_npc_dex" data-field-name="dex" type="number"><div class="field-error" data-field-error="dex"></div></div>
+      <div class="field"><label>Initiative Bonus (optional)</label><input id="mdl_setup_new_npc_bonus" data-field-name="initiative_bonus" type="number"><div class="field-error" data-field-error="initiative_bonus"></div></div>
+      <div class="field"><label>Count</label><input id="mdl_setup_new_npc_count" type="number" value="1" min="1"></div>
+      <div class="field"><label>Token Labels (comma-separated, optional)</label><input id="mdl_setup_new_npc_labels" placeholder="B1,B2,B3"></div>
+    </div>
     <div class="btn-group">
       <button onclick="closeModal()">Cancel</button>
       <button class="primary" onclick="submitAddNpc()">Add</button>
@@ -258,19 +601,68 @@ function showAddNpc() {
   `);
 }
 
+function showAddNpcNewOnly() {
+  showModal(`
+    <h3>Add NPC</h3>
+    <p style="color:var(--muted);margin-bottom:12px">No NPC templates yet. Create one:</p>
+    <div class="field"><label>Name</label><input id="mdl_setup_new_npc_name" data-field-name="name"><div class="field-error" data-field-error="name"></div></div>
+    <div class="field"><label>AC</label><input id="mdl_setup_new_npc_ac" data-field-name="ac" type="number" min="0"><div class="field-error" data-field-error="ac"></div></div>
+    <div class="field"><label>HP</label><input id="mdl_setup_new_npc_hp" data-field-name="hp" type="number" min="0"><div class="field-error" data-field-error="hp"></div></div>
+    <div class="field"><label>DEX</label><input id="mdl_setup_new_npc_dex" data-field-name="dex" type="number"><div class="field-error" data-field-error="dex"></div></div>
+    <div class="field"><label>Initiative Bonus (optional)</label><input id="mdl_setup_new_npc_bonus" data-field-name="initiative_bonus" type="number"><div class="field-error" data-field-error="initiative_bonus"></div></div>
+    <div class="field"><label>Count</label><input id="mdl_setup_new_npc_count" type="number" value="1" min="1"></div>
+    <div class="field"><label>Token Labels (comma-separated, optional)</label><input id="mdl_setup_new_npc_labels" placeholder="B1,B2,B3"></div>
+    <div class="btn-group">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="primary" onclick="submitAddNpcNew()">Create & Add</button>
+    </div>
+  `);
+}
+
 function onNpcSelect() {
   const select = document.getElementById("mdl_npc_name");
-  const option = select.options[select.selectedIndex];
-  document.getElementById("mdl_npc_hp").value = option.dataset.hp || "";
-  document.getElementById("mdl_npc_ac").value = option.dataset.ac || "";
+  const isNew = select.value === "";
+  document.getElementById("setupNpcExistingFields").classList.toggle("hidden", isNew);
+  document.getElementById("setupNpcNewFields").classList.toggle("hidden", !isNew);
+  if (!isNew) {
+    const option = select.options[select.selectedIndex];
+    document.getElementById("mdl_npc_hp").value = option.dataset.hp || "";
+    document.getElementById("mdl_npc_ac").value = option.dataset.ac || "";
+  }
 }
 
 async function submitAddNpc() {
-  const name = document.getElementById("mdl_npc_name").value;
+  const select = document.getElementById("mdl_npc_name");
+  if (select && select.value === "") {
+    await submitAddNpcNew();
+    return;
+  }
+  const name = select ? select.value : "";
   const count = parseInt(document.getElementById("mdl_npc_count").value, 10) || 1;
   const labels = document.getElementById("mdl_npc_labels").value;
   const hp = parseOptionalInteger("mdl_npc_hp");
   const ac = parseOptionalInteger("mdl_npc_ac");
+  closeModal();
+  await api("POST", "/api/add-npc", { name, count, labels, hp, ac });
+  await load();
+}
+
+async function submitAddNpcNew() {
+  clearModalValidation();
+  const name = document.getElementById("mdl_setup_new_npc_name").value.trim();
+  const ac = parseOptionalInteger("mdl_setup_new_npc_ac");
+  const hp = parseOptionalInteger("mdl_setup_new_npc_hp");
+  const dex = parseOptionalInteger("mdl_setup_new_npc_dex");
+  const initiative_bonus = parseOptionalInteger("mdl_setup_new_npc_bonus");
+  const count = parseInt(document.getElementById("mdl_setup_new_npc_count").value, 10) || 1;
+  const labels = document.getElementById("mdl_setup_new_npc_labels").value;
+
+  const saveResponse = await api("POST", "/api/save-npc-template", { name, ac, hp, dex, initiative_bonus, tags: "", notes: "" });
+  if (saveResponse.field_errors && Object.keys(saveResponse.field_errors).length) {
+    applyTemplateFieldErrors(saveResponse.field_errors);
+    setMessage(saveResponse.message || "Validation failed.");
+    return;
+  }
   closeModal();
   await api("POST", "/api/add-npc", { name, count, labels, hp, ac });
   await load();

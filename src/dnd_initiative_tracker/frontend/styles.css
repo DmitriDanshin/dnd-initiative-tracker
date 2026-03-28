@@ -83,6 +83,16 @@ button.green {
   color: #111;
 }
 
+button.danger {
+  background: #8b0000;
+  border-color: #a00;
+}
+
+button.danger:hover {
+  background: var(--red);
+  border-color: var(--red);
+}
+
 .btn-group {
   display: flex;
   gap: 8px;

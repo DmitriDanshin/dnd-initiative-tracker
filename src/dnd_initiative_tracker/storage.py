@@ -99,6 +99,20 @@ class MarkdownRepository:
                 return template
         return None
 
+    def delete_npc_template(self, name: str) -> bool:
+        path = self.npc_path / f"{self.slugify(name)}.md"
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
+    def delete_player_template(self, name: str) -> bool:
+        path = self.players_path / f"{self.slugify(name)}.md"
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
     def parse_npc_template_markdown(self, text: str) -> NpcTemplate:
         front_matter, body = self._parse_markdown_text(text)
         front_matter["notes"] = self._combine_notes(front_matter.get("notes", ""), body)
