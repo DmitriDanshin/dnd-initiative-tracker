@@ -4,7 +4,8 @@ import importlib.resources
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from pydantic import ValidationError
 
 from dnd_initiative_tracker.initiative import (
     assign_npc_initiative,
@@ -14,7 +15,12 @@ from dnd_initiative_tracker.initiative import (
 from dnd_initiative_tracker.models import Combatant, EncounterState, NpcTemplate, PlayerTemplate
 from dnd_initiative_tracker.storage import MarkdownRepository
 
-HTML_PAGE = importlib.resources.files("dnd_initiative_tracker").joinpath("index.html").read_text(encoding="utf-8")
+PACKAGE_FILES = importlib.resources.files("dnd_initiative_tracker")
+FRONTEND_FILES = PACKAGE_FILES.joinpath("frontend")
+
+
+def read_resource_text(filename: str) -> str:
+    return FRONTEND_FILES.joinpath(filename).read_text(encoding="utf-8")
 
 
 class DndInitiativeTrackerApp:
@@ -22,6 +28,7 @@ class DndInitiativeTrackerApp:
         self.repository = MarkdownRepository(root_path)
         self.mode = "home"
         self.message = ""
+        self.field_errors: dict[str, str] = {}
         self.selected_index = 0
         self.setup_encounter_name = "New Encounter"
         self.setup_combatants: list[Combatant] = []
@@ -32,17 +39,18 @@ class DndInitiativeTrackerApp:
         base: dict = {
             "mode": self.mode,
             "message": self.message,
+            "field_errors": self.field_errors,
             "selected_index": self.selected_index,
+            "npc_templates": [
+                {"name": t.name, "hp": t.hp, "ac": t.ac} for t in self.repository.list_npc_templates()
+            ],
+            "player_templates": [t.name for t in self.repository.list_player_templates()],
         }
         if self.mode == "home":
             base["encounters"] = self.repository.list_encounters()
         elif self.mode == "setup":
             base["setup_encounter_name"] = self.setup_encounter_name
             base["setup_combatants"] = [c.model_dump() for c in self.setup_combatants]
-            base["npc_templates"] = [
-                {"name": t.name, "hp": t.hp, "ac": t.ac} for t in self.repository.list_npc_templates()
-            ]
-            base["player_templates"] = [t.name for t in self.repository.list_player_templates()]
         elif self.mode == "combat" and self.current_encounter is not None:
             base["encounter"] = self.current_encounter.model_dump()
         return base
@@ -55,6 +63,7 @@ class DndInitiativeTrackerApp:
         self.mode = "home"
         self.selected_index = 0
         self.message = ""
+        self.field_errors = {}
 
     def start_new_encounter(self) -> None:
         self.mode = "setup"
@@ -62,18 +71,29 @@ class DndInitiativeTrackerApp:
         self.setup_combatants = []
         self.selected_index = 0
         self.message = ""
+        self.field_errors = {}
 
     def resume_encounter(self, encounter_id: str) -> None:
-        self.current_encounter = self.repository.load_encounter(encounter_id)
+        try:
+            self.current_encounter = self.repository.load_encounter(encounter_id)
+        except (FileNotFoundError, ValueError):
+            self.current_encounter = None
+            self.mode = "home"
+            self.selected_index = 0
+            self.field_errors = {}
+            self.message = f"Encounter '{encounter_id}' not found."
+            return
         self.mode = "combat"
         self.selected_index = self.current_encounter.active_index
         active = self.current_encounter.combatants[self.current_encounter.active_index]
         self.message = f"Resumed. Round {self.current_encounter.round}, active: {active.display_name}."
+        self.field_errors = {}
         self._save_last_encounter_id(encounter_id)
 
     def set_encounter_name(self, name: str) -> None:
         self.setup_encounter_name = name
         self.message = f"Encounter name set to {name}."
+        self.field_errors = {}
 
     def add_npc(
         self,
@@ -110,6 +130,7 @@ class DndInitiativeTrackerApp:
             self.setup_combatants.append(combatant)
         self.selected_index = len(self.setup_combatants) - 1
         self.message = f"Added {count} {npc_template.name}."
+        self.field_errors = {}
 
     def add_player(self, name: str, initiative_bonus: int | None) -> None:
         if not name:
@@ -141,6 +162,72 @@ class DndInitiativeTrackerApp:
         self.setup_combatants.append(combatant)
         self.selected_index = len(self.setup_combatants) - 1
         self.message = f"Added player {player_template.name}."
+        self.field_errors = {}
+
+    def save_npc_template(
+        self,
+        name: str | None = None,
+        ac: int | None = None,
+        hp: int | None = None,
+        dex: int | None = None,
+        initiative_bonus: int | None = None,
+        tags_raw: str = "",
+        notes: str = "",
+        markdown: str = "",
+    ) -> None:
+        try:
+            if markdown.strip():
+                template = self.repository.parse_npc_template_markdown(markdown)
+            else:
+                tags = [tag.strip() for tag in tags_raw.split(",") if tag.strip()]
+                template = NpcTemplate(
+                    name=name or "",
+                    ac=ac,
+                    hp=hp,
+                    dex=dex,
+                    initiative_bonus=initiative_bonus,
+                    tags=tags,
+                    notes=notes.strip(),
+                )
+        except (ValidationError, ValueError) as error:
+            self.message = "NPC template validation failed."
+            self.field_errors = self._extract_field_errors(error, markdown_field="markdown")
+            return
+        self.repository.save_npc_template(template)
+        self.message = f"Saved NPC template {template.name}."
+        self.field_errors = {}
+
+    def save_player_template(
+        self,
+        name: str | None = None,
+        ac: int | None = None,
+        max_hp: int | None = None,
+        current_hp: int | None = None,
+        dex: int | None = None,
+        initiative_bonus: int | None = None,
+        notes: str = "",
+        markdown: str = "",
+    ) -> None:
+        try:
+            if markdown.strip():
+                template = self.repository.parse_player_template_markdown(markdown)
+            else:
+                template = PlayerTemplate(
+                    name=name or "",
+                    ac=ac,
+                    max_hp=max_hp,
+                    current_hp=current_hp,
+                    dex=dex,
+                    initiative_bonus=initiative_bonus,
+                    notes=notes.strip(),
+                )
+        except (ValidationError, ValueError) as error:
+            self.message = "Player template validation failed."
+            self.field_errors = self._extract_field_errors(error, markdown_field="markdown")
+            return
+        self.repository.save_player_template(template)
+        self.message = f"Saved player template {template.name}."
+        self.field_errors = {}
 
     def roll_npc_initiative(self) -> None:
         npc_count = 0
@@ -236,6 +323,7 @@ class DndInitiativeTrackerApp:
         if self.current_encounter is not None:
             self.repository.save_encounter(self.current_encounter)
             self.message = "Encounter saved."
+            self.field_errors = {}
 
     def _autosave(self) -> None:
         if self.current_encounter is not None:
@@ -291,6 +379,20 @@ class DndInitiativeTrackerApp:
             sort_index=len(self.setup_combatants),
         )
 
+    @staticmethod
+    def _extract_field_errors(
+        error: ValidationError | ValueError,
+        markdown_field: str,
+    ) -> dict[str, str]:
+        if isinstance(error, ValidationError):
+            field_errors: dict[str, str] = {}
+            for item in error.errors():
+                location = item.get("loc") or ()
+                field_name = str(location[0]) if location else "form"
+                field_errors[field_name] = item.get("msg", "Invalid value.")
+            return field_errors
+        return {markdown_field: str(error)}
+
 
 def create_fastapi_app(root_path: Path | None = None) -> FastAPI:
     effective_root_path = root_path or Path.cwd()
@@ -299,7 +401,28 @@ def create_fastapi_app(root_path: Path | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
-        return HTML_PAGE
+        tracker.go_home()
+        return read_resource_text("home.html")
+
+    @app.get("/encounter/new", response_class=HTMLResponse)
+    async def encounter_new_page():
+        tracker.start_new_encounter()
+        return read_resource_text("setup.html")
+
+    @app.get("/encounter/{encounter_id}")
+    async def encounter_page(encounter_id: str):
+        tracker.resume_encounter(encounter_id)
+        if tracker.mode != "combat":
+            return RedirectResponse(url="/", status_code=307)
+        return HTMLResponse(read_resource_text("combat.html"))
+
+    @app.get("/assets/app.js", response_class=PlainTextResponse)
+    async def app_js():
+        return PlainTextResponse(read_resource_text("app.js"), media_type="application/javascript")
+
+    @app.get("/assets/styles.css", response_class=PlainTextResponse)
+    async def styles_css():
+        return PlainTextResponse(read_resource_text("styles.css"), media_type="text/css")
 
     @app.get("/api/state")
     async def get_state():
@@ -343,6 +466,36 @@ def create_fastapi_app(root_path: Path | None = None) -> FastAPI:
     async def add_player(request: Request):
         body = await request.json()
         tracker.add_player(body["name"], body.get("initiative_bonus"))
+        return JSONResponse(tracker.get_state())
+
+    @app.post("/api/save-npc-template")
+    async def save_npc_template(request: Request):
+        body = await request.json()
+        tracker.save_npc_template(
+            name=body.get("name"),
+            ac=body.get("ac"),
+            hp=body.get("hp"),
+            dex=body.get("dex"),
+            initiative_bonus=body.get("initiative_bonus"),
+            tags_raw=body.get("tags", ""),
+            notes=body.get("notes", ""),
+            markdown=body.get("markdown", ""),
+        )
+        return JSONResponse(tracker.get_state())
+
+    @app.post("/api/save-player-template")
+    async def save_player_template(request: Request):
+        body = await request.json()
+        tracker.save_player_template(
+            name=body.get("name"),
+            ac=body.get("ac"),
+            max_hp=body.get("max_hp"),
+            current_hp=body.get("current_hp"),
+            dex=body.get("dex"),
+            initiative_bonus=body.get("initiative_bonus"),
+            notes=body.get("notes", ""),
+            markdown=body.get("markdown", ""),
+        )
         return JSONResponse(tracker.get_state())
 
     @app.post("/api/roll-npc")

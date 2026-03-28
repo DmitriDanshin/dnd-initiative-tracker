@@ -30,3 +30,6 @@ testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+dnd_initiative_tracker = ["frontend/*.html", "frontend/*.css", "frontend/*.js"]

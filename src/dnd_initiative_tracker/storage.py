@@ -99,14 +99,19 @@ class MarkdownRepository:
                 return template
         return None
 
+    def parse_npc_template_markdown(self, text: str) -> NpcTemplate:
+        front_matter, body = self._parse_markdown_text(text)
+        front_matter["notes"] = self._combine_notes(front_matter.get("notes", ""), body)
+        return NpcTemplate.model_validate(front_matter)
+
+    def parse_player_template_markdown(self, text: str) -> PlayerTemplate:
+        front_matter, body = self._parse_markdown_text(text)
+        front_matter["notes"] = self._combine_notes(front_matter.get("notes", ""), body)
+        return PlayerTemplate.model_validate(front_matter)
+
     def _read_markdown(self, path: Path) -> tuple[dict[str, Any], str]:
         text = path.read_text(encoding="utf-8")
-        if not text.startswith("---"):
-            raise ValueError(f"Markdown file {path} must start with YAML front matter.")
-        _, raw_front_matter, remainder = text.split("---", 2)
-        front_matter = yaml.safe_load(raw_front_matter) or {}
-        body = remainder.lstrip("\r\n")
-        return front_matter, body.rstrip()
+        return self._parse_markdown_text(text, source=str(path))
 
     def _write_markdown(self, path: Path, front_matter: dict[str, Any], body: str) -> None:
         serialized_front_matter = yaml.safe_dump(
@@ -123,6 +128,18 @@ class MarkdownRepository:
     def _combine_notes(notes: str, body: str) -> str:
         notes_parts = [part.strip() for part in (notes, body) if part.strip()]
         return "\n\n".join(notes_parts)
+
+    @staticmethod
+    def _parse_markdown_text(text: str, source: str = "markdown input") -> tuple[dict[str, Any], str]:
+        if not text.startswith("---"):
+            raise ValueError(f"{source} must start with YAML front matter.")
+        parts = text.split("---", 2)
+        if len(parts) != 3:
+            raise ValueError(f"{source} has invalid YAML front matter.")
+        _, raw_front_matter, remainder = parts
+        front_matter = yaml.safe_load(raw_front_matter) or {}
+        body = remainder.lstrip("\r\n")
+        return front_matter, body.rstrip()
 
     @staticmethod
     def slugify(value: str) -> str:

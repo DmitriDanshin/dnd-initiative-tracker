@@ -4,9 +4,10 @@ Local FastAPI web server for tracking DnD encounters with markdown-backed NPC/pl
 
 ## Features
 
-- FastAPI backend with a bundled single-page web UI
+- FastAPI backend with separate home, setup, and combat pages
 - NPC templates in `npc/*.md`
 - Player templates in `players/*.md`
+- Create NPC/player templates from the home screen using a form or pasted markdown
 - Optional player combat stats
 - Automatic NPC initiative based on DnD Dexterity rules
 - Manual player initiative entry before combat starts
@@ -17,7 +18,7 @@ Local FastAPI web server for tracking DnD encounters with markdown-backed NPC/pl
 ## Project layout
 
 - `src/dnd_initiative_tracker/app.py` contains the FastAPI app and encounter state logic
-- `src/dnd_initiative_tracker/index.html` contains the bundled frontend
+- `src/dnd_initiative_tracker/frontend/` contains the page templates, shared JS, and shared CSS
 - `src/dnd_initiative_tracker/storage.py` reads and writes markdown data
 - `npc/`, `players/`, and `saves/` are created automatically in the working directory
 
@@ -95,15 +96,14 @@ uv run pytest
 
 ## Web workflow
 
-1. Create or edit NPC markdown files in `npc/`
-2. Create players in `players/` or add them from the setup screen
-3. Open `http://127.0.0.1:8000`
-4. Start a new encounter or resume a saved one
-5. Add NPCs with optional token labels like `B1,B2,B3`
-6. Add players
-7. Roll NPC initiative
-8. Enter player initiative rolls
-9. Track turns, HP, and save state from the combat screen
+1. Create NPC and player templates from the home screen, or edit markdown files in `npc/` and `players/`
+2. Open `http://127.0.0.1:8000`
+3. Start a new encounter or resume a saved one
+4. Add NPCs with optional token labels like `B1,B2,B3`
+5. Add players
+6. Roll NPC initiative
+7. Enter player initiative rolls
+8. Track turns, HP, and save state from the combat screen
 
 ## HTTP endpoints
 
@@ -114,6 +114,8 @@ uv run pytest
 - `POST /api/set-encounter-name` renames the setup encounter
 - `POST /api/add-npc` adds NPC combatants
 - `POST /api/add-player` adds a player combatant
+- `POST /api/save-npc-template` creates or updates an NPC template
+- `POST /api/save-player-template` creates or updates a player template
 - `POST /api/roll-npc` rolls initiative for NPCs
 - `POST /api/remove-combatant` removes a setup combatant
 - `POST /api/select` changes selected combatant
