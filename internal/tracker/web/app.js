@@ -66,7 +66,8 @@ function parseOptionalInteger(elementId) {
   return raw === "" ? null : parseInt(raw, 10);
 }
 
-const searchableSelects = {};
+const searchablePickers = {};
+const SEARCHABLE_CUSTOM_VALUE = "__searchable_custom__";
 
 function normalizeSearchText(value) {
   return String(value ?? "")
@@ -130,78 +131,259 @@ function rankSearchableOptions(options, query) {
     .map((entry) => entry.option);
 }
 
-function renderSearchableSelect(key) {
-  const config = searchableSelects[key];
-  if (!config) return;
+function buildHighlightedLabel(label, query) {
+  const trimmedQuery = String(query ?? "").trim();
+  if (!trimmedQuery) return escapeHtml(label);
 
-  const searchInput = document.getElementById(config.searchInputId);
-  const select = document.getElementById(config.selectId);
-  if (!searchInput || !select) return;
+  const lowerLabel = label.toLowerCase();
+  const lowerQuery = trimmedQuery.toLowerCase();
+  const highlightedIndexes = new Set();
+  const substringIndex = lowerLabel.indexOf(lowerQuery);
 
-  const query = searchInput.value || "";
-  const rankedOptions = rankSearchableOptions(config.options, query);
-  const previousValue = config.selectedValue ?? select.value ?? "";
-
-  select.innerHTML = "";
-  rankedOptions.forEach((optionData) => {
-    const option = document.createElement("option");
-    option.value = optionData.value;
-    option.textContent = optionData.label;
-    Object.entries(optionData.dataset || {}).forEach(([name, value]) => {
-      option.dataset[name] = value == null ? "" : String(value);
-    });
-    select.appendChild(option);
-  });
-
-  if (config.allowCustom) {
-    const option = document.createElement("option");
-    option.value = config.customValue ?? "";
-    option.textContent = config.customLabel;
-    select.appendChild(option);
-  }
-
-  const selectableValues = new Set(rankedOptions.map((option) => option.value));
-  if (config.allowCustom) {
-    selectableValues.add(config.customValue ?? "");
-  }
-
-  let nextValue = previousValue;
-  if (!selectableValues.has(nextValue)) {
-    if (rankedOptions.length > 0) {
-      nextValue = rankedOptions[0].value;
-    } else if (config.allowCustom) {
-      nextValue = config.customValue ?? "";
-    } else {
-      nextValue = "";
+  if (substringIndex >= 0) {
+    for (let index = substringIndex; index < substringIndex + lowerQuery.length; index += 1) {
+      highlightedIndexes.add(index);
+    }
+  } else {
+    let queryIndex = 0;
+    for (let labelIndex = 0; labelIndex < label.length && queryIndex < trimmedQuery.length; labelIndex += 1) {
+      if (lowerLabel[labelIndex] !== lowerQuery[queryIndex]) continue;
+      highlightedIndexes.add(labelIndex);
+      queryIndex += 1;
     }
   }
 
-  select.value = nextValue;
-  config.selectedValue = nextValue;
-
-  if (typeof config.onChange === "function") {
-    config.onChange(nextValue, rankedOptions, query);
+  let html = "";
+  let inMark = false;
+  for (let index = 0; index < label.length; index += 1) {
+    const highlighted = highlightedIndexes.has(index);
+    if (highlighted && !inMark) {
+      html += "<mark>";
+      inMark = true;
+    }
+    if (!highlighted && inMark) {
+      html += "</mark>";
+      inMark = false;
+    }
+    html += escapeHtml(label[index]);
   }
+  if (inMark) html += "</mark>";
+  return html;
 }
 
-function initSearchableSelect(key, config) {
-  searchableSelects[key] = { ...config, selectedValue: config.selectedValue };
-  renderSearchableSelect(key);
+function getSearchablePicker(key) {
+  return searchablePickers[key] || null;
 }
 
-function updateSearchableSelect(key) {
-  renderSearchableSelect(key);
+function getSearchableQuery(key) {
+  const config = getSearchablePicker(key);
+  if (!config) return "";
+  return document.getElementById(config.searchInputId)?.value || "";
 }
 
-function handleSearchableSelectChange(key) {
-  const config = searchableSelects[key];
+function getSearchableSelectedValue(key) {
+  return getSearchablePicker(key)?.selectedValue || "";
+}
+
+function getSearchableSelectedOption(key) {
+  const config = getSearchablePicker(key);
+  if (!config) return null;
+  return config.options.find((option) => option.value === config.selectedValue) || null;
+}
+
+function renderSearchablePicker(key) {
+  const config = getSearchablePicker(key);
   if (!config) return;
-  const select = document.getElementById(config.selectId);
-  if (!select) return;
-  config.selectedValue = select.value;
-  if (typeof config.onChange === "function") {
-    config.onChange(select.value, rankSearchableOptions(config.options, document.getElementById(config.searchInputId)?.value || ""), document.getElementById(config.searchInputId)?.value || "");
+
+  const searchInput = document.getElementById(config.searchInputId);
+  const results = document.getElementById(config.resultsId);
+  if (!searchInput || !results) return;
+
+  const query = searchInput.value || "";
+  const rankedOptions = rankSearchableOptions(config.options, query);
+  const normalizedQuery = normalizeSearchText(query);
+  const hasExactMatch = normalizedQuery !== "" && config.options.some((option) => normalizeSearchText(option.label) === normalizedQuery);
+  const previousValue = config.selectedValue ?? "";
+  const canUseCustom = config.allowCustom && query.trim() !== "" && !hasExactMatch;
+  const shouldShowResults = config.isOpen && !config.selectionCommitted;
+
+  let nextValue = previousValue;
+  const hasPreviousMatch = rankedOptions.some((option) => option.value === previousValue);
+  if (previousValue === SEARCHABLE_CUSTOM_VALUE && canUseCustom) {
+    nextValue = SEARCHABLE_CUSTOM_VALUE;
+  } else if (hasPreviousMatch) {
+    nextValue = previousValue;
+  } else if (rankedOptions.length > 0) {
+    nextValue = rankedOptions[0].value;
+  } else if (canUseCustom) {
+    nextValue = SEARCHABLE_CUSTOM_VALUE;
+  } else {
+    nextValue = "";
   }
+
+  config.selectedValue = nextValue;
+  config.activeIndex = -1;
+  results.innerHTML = "";
+  results.classList.toggle("hidden", !shouldShowResults);
+
+  const visibleOptions = rankedOptions.slice(0, config.maxVisibleOptions || 8);
+  const allButtons = [];
+
+  if (shouldShowResults) {
+    let initialActiveIndex = 0;
+
+    visibleOptions.forEach((optionData, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "search-result";
+      button.innerHTML = buildHighlightedLabel(optionData.label, query);
+      button.dataset.pickerIndex = String(index);
+      button.addEventListener("click", () => {
+        commitSearchableSelection(key, optionData.value, optionData.label);
+      });
+      button.addEventListener("mouseenter", () => {
+        setSearchableActiveIndex(key, index);
+      });
+      results.appendChild(button);
+      allButtons.push(button);
+      if (optionData.value === nextValue) initialActiveIndex = index;
+    });
+
+    if (canUseCustom) {
+      const customIndex = visibleOptions.length;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "search-result create-new";
+      button.innerHTML = (config.customLabelPrefix || "Create") + " <strong>" + escapeHtml(query.trim()) + "</strong>";
+      button.dataset.pickerIndex = String(customIndex);
+      button.addEventListener("click", () => {
+        commitSearchableSelection(key, SEARCHABLE_CUSTOM_VALUE, null);
+      });
+      button.addEventListener("mouseenter", () => {
+        setSearchableActiveIndex(key, customIndex);
+      });
+      results.appendChild(button);
+      allButtons.push(button);
+      if (nextValue === SEARCHABLE_CUSTOM_VALUE) initialActiveIndex = customIndex;
+    }
+
+    if (!results.childElementCount) {
+      const empty = document.createElement("div");
+      empty.className = "search-empty";
+      empty.textContent = config.emptyMessage || "No matches found.";
+      results.appendChild(empty);
+    }
+
+    // Highlight the initial active item for keyboard navigation
+    if (allButtons.length > 0) {
+      config.activeIndex = initialActiveIndex;
+      allButtons[initialActiveIndex].classList.add("active");
+    }
+  }
+
+  config._buttons = allButtons;
+
+  if (typeof config.onChange === "function") {
+    config.onChange(nextValue, visibleOptions, query);
+  }
+}
+
+function commitSearchableSelection(key, value, label) {
+  const config = getSearchablePicker(key);
+  if (!config) return;
+  const searchInput = document.getElementById(config.searchInputId);
+  config.selectedValue = value;
+  config.selectionCommitted = true;
+  config.isOpen = false;
+  if (label != null && searchInput) searchInput.value = label;
+  renderSearchablePicker(key);
+}
+
+function setSearchableActiveIndex(key, index) {
+  const config = getSearchablePicker(key);
+  if (!config || !config._buttons) return;
+  config._buttons.forEach((btn) => btn.classList.remove("active"));
+  if (index >= 0 && index < config._buttons.length) {
+    config.activeIndex = index;
+    config._buttons[index].classList.add("active");
+    config._buttons[index].scrollIntoView({ block: "nearest" });
+  }
+}
+
+function handleSearchableKeydown(key, event) {
+  const config = getSearchablePicker(key);
+  if (!config || !config._buttons || !config.isOpen || config.selectionCommitted) return;
+
+  const buttons = config._buttons;
+  if (!buttons.length) return;
+
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    const next = (config.activeIndex + 1) % buttons.length;
+    setSearchableActiveIndex(key, next);
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    const prev = (config.activeIndex - 1 + buttons.length) % buttons.length;
+    setSearchableActiveIndex(key, prev);
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    if (config.activeIndex >= 0 && config.activeIndex < buttons.length) {
+      buttons[config.activeIndex].click();
+    }
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    config.isOpen = false;
+    config.selectionCommitted = true;
+    renderSearchablePicker(key);
+    document.getElementById(config.searchInputId)?.blur();
+  }
+}
+
+function initSearchablePicker(key, config) {
+  searchablePickers[key] = { ...config, selectedValue: config.selectedValue, selectionCommitted: false, isOpen: false, activeIndex: -1, _buttons: [] };
+
+  const searchInput = document.getElementById(config.searchInputId);
+  if (searchInput) {
+    searchInput.addEventListener("focus", () => {
+      const cfg = getSearchablePicker(key);
+      if (!cfg) return;
+      cfg.isOpen = true;
+      cfg.selectionCommitted = false;
+      searchInput.select();
+      renderSearchablePicker(key);
+    });
+
+    searchInput.addEventListener("keydown", (event) => {
+      handleSearchableKeydown(key, event);
+    });
+
+    // Close on click outside the picker
+    const pickerContainer = searchInput.closest(".search-picker");
+    if (pickerContainer) {
+      document.addEventListener("mousedown", (event) => {
+        const cfg = getSearchablePicker(key);
+        if (!cfg || !cfg.isOpen) return;
+        if (!pickerContainer.contains(event.target)) {
+          cfg.isOpen = false;
+          cfg.selectionCommitted = true;
+          renderSearchablePicker(key);
+        }
+      });
+    }
+
+    // Autofocus the search input
+    requestAnimationFrame(() => searchInput.focus());
+  }
+
+  renderSearchablePicker(key);
+}
+
+function updateSearchablePicker(key) {
+  const config = getSearchablePicker(key);
+  if (!config) return;
+  config.selectionCommitted = false;
+  config.isOpen = true;
+  renderSearchablePicker(key);
 }
 
 function setMessage(message) {
@@ -453,9 +635,9 @@ function showAddNpcCombat() {
   showModal(`
     <h3>Add NPC to Combat</h3>
     <div class="field"><label>NPC Template</label>
-      <div class="search-select">
-        <input id="mdl_combat_npc_search" type="search" placeholder="Search NPC template" oninput="updateSearchableSelect('combatNpcTemplate')">
-        <select id="mdl_combat_npc_name" onchange="handleSearchableSelectChange('combatNpcTemplate')"></select>
+      <div class="search-picker">
+        <input id="mdl_combat_npc_search" type="search" placeholder="Search NPC template" oninput="updateSearchablePicker('combatNpcTemplate')">
+        <div id="mdl_combat_npc_results" class="search-results"></div>
       </div></div>
     <div id="combatNpcExistingFields">
       <div class="field"><label>HP</label><input id="mdl_combat_npc_hp" type="number" value="${first.hp}" min="1"></div>
@@ -477,18 +659,18 @@ function showAddNpcCombat() {
       <button class="primary" onclick="submitAddNpcCombat()">Add</button>
     </div>
   `);
-  initSearchableSelect("combatNpcTemplate", {
+  initSearchablePicker("combatNpcTemplate", {
     searchInputId: "mdl_combat_npc_search",
-    selectId: "mdl_combat_npc_name",
+    resultsId: "mdl_combat_npc_results",
     options: templates.map((template) => ({
       value: template.name,
       label: template.name,
       dataset: { hp: template.hp, ac: template.ac },
     })),
     allowCustom: true,
-    customValue: "",
-    customLabel: "-- create new --",
     selectedValue: first.name || "",
+    customLabelPrefix: "Create new NPC:",
+    emptyMessage: "No NPC templates found.",
     onChange: onCombatNpcSelect,
   });
 }
@@ -512,25 +694,26 @@ function showAddNpcCombatNewOnly() {
 }
 
 function onCombatNpcSelect() {
-  const select = document.getElementById("mdl_combat_npc_name");
-  if (!select) return;
-  const isNew = select.value === "";
+  const selectedValue = getSearchableSelectedValue("combatNpcTemplate");
+  const isNew = selectedValue === SEARCHABLE_CUSTOM_VALUE;
   document.getElementById("combatNpcExistingFields").classList.toggle("hidden", isNew);
   document.getElementById("combatNpcNewFields").classList.toggle("hidden", !isNew);
   if (!isNew) {
-    const option = select.options[select.selectedIndex];
-    document.getElementById("mdl_combat_npc_hp").value = option.dataset.hp || "";
-    document.getElementById("mdl_combat_npc_ac").value = option.dataset.ac || "";
+    const option = getSearchableSelectedOption("combatNpcTemplate");
+    document.getElementById("mdl_combat_npc_hp").value = option?.dataset?.hp || "";
+    document.getElementById("mdl_combat_npc_ac").value = option?.dataset?.ac || "";
+  } else {
+    document.getElementById("mdl_combat_new_npc_name").value = getSearchableQuery("combatNpcTemplate").trim();
   }
 }
 
 async function submitAddNpcCombat() {
-  const select = document.getElementById("mdl_combat_npc_name");
-  if (select && select.value === "") {
+  const selectedValue = getSearchableSelectedValue("combatNpcTemplate");
+  if (selectedValue === SEARCHABLE_CUSTOM_VALUE) {
     await submitAddNpcCombatNew();
     return;
   }
-  const name = select ? select.value : "";
+  const name = selectedValue;
   const count = parseInt(document.getElementById("mdl_combat_npc_count").value, 10) || 1;
   const labels = document.getElementById("mdl_combat_npc_labels").value;
   const hp = parseOptionalInteger("mdl_combat_npc_hp");
@@ -796,9 +979,9 @@ function showAddNpc() {
   showModal(`
     <h3>Add NPC</h3>
     <div class="field"><label>NPC Template</label>
-      <div class="search-select">
-        <input id="mdl_npc_search" type="search" placeholder="Search NPC template" oninput="updateSearchableSelect('setupNpcTemplate')">
-        <select id="mdl_npc_name" onchange="handleSearchableSelectChange('setupNpcTemplate')"></select>
+      <div class="search-picker">
+        <input id="mdl_npc_search" type="search" placeholder="Search NPC template" oninput="updateSearchablePicker('setupNpcTemplate')">
+        <div id="mdl_npc_results" class="search-results"></div>
       </div></div>
     <div id="setupNpcExistingFields">
       <div class="field"><label>HP</label><input id="mdl_npc_hp" type="number" value="${first.hp}" min="1"></div>
@@ -820,18 +1003,18 @@ function showAddNpc() {
       <button class="primary" onclick="submitAddNpc()">Add</button>
     </div>
   `);
-  initSearchableSelect("setupNpcTemplate", {
+  initSearchablePicker("setupNpcTemplate", {
     searchInputId: "mdl_npc_search",
-    selectId: "mdl_npc_name",
+    resultsId: "mdl_npc_results",
     options: templates.map((template) => ({
       value: template.name,
       label: template.name,
       dataset: { hp: template.hp, ac: template.ac },
     })),
     allowCustom: true,
-    customValue: "",
-    customLabel: "-- create new --",
     selectedValue: first.name || "",
+    customLabelPrefix: "Create new NPC:",
+    emptyMessage: "No NPC templates found.",
     onChange: onNpcSelect,
   });
 }
@@ -855,25 +1038,26 @@ function showAddNpcNewOnly() {
 }
 
 function onNpcSelect() {
-  const select = document.getElementById("mdl_npc_name");
-  if (!select) return;
-  const isNew = select.value === "";
+  const selectedValue = getSearchableSelectedValue("setupNpcTemplate");
+  const isNew = selectedValue === SEARCHABLE_CUSTOM_VALUE;
   document.getElementById("setupNpcExistingFields").classList.toggle("hidden", isNew);
   document.getElementById("setupNpcNewFields").classList.toggle("hidden", !isNew);
   if (!isNew) {
-    const option = select.options[select.selectedIndex];
-    document.getElementById("mdl_npc_hp").value = option.dataset.hp || "";
-    document.getElementById("mdl_npc_ac").value = option.dataset.ac || "";
+    const option = getSearchableSelectedOption("setupNpcTemplate");
+    document.getElementById("mdl_npc_hp").value = option?.dataset?.hp || "";
+    document.getElementById("mdl_npc_ac").value = option?.dataset?.ac || "";
+  } else {
+    document.getElementById("mdl_setup_new_npc_name").value = getSearchableQuery("setupNpcTemplate").trim();
   }
 }
 
 async function submitAddNpc() {
-  const select = document.getElementById("mdl_npc_name");
-  if (select && select.value === "") {
+  const selectedValue = getSearchableSelectedValue("setupNpcTemplate");
+  if (selectedValue === SEARCHABLE_CUSTOM_VALUE) {
     await submitAddNpcNew();
     return;
   }
-  const name = select ? select.value : "";
+  const name = selectedValue;
   const count = parseInt(document.getElementById("mdl_npc_count").value, 10) || 1;
   const labels = document.getElementById("mdl_npc_labels").value;
   const hp = parseOptionalInteger("mdl_npc_hp");
@@ -909,9 +1093,9 @@ function showAddPlayer() {
   showModal(`
     <h3>Add Player</h3>
     <div class="field"><label>Player</label>
-      <div class="search-select">
-        <input id="mdl_player_search" type="search" placeholder="Search player" oninput="updateSearchableSelect('setupPlayerTemplate')">
-        <select id="mdl_player_name" onchange="handleSearchableSelectChange('setupPlayerTemplate')"></select>
+      <div class="search-picker">
+        <input id="mdl_player_search" type="search" placeholder="Search player" oninput="updateSearchablePicker('setupPlayerTemplate')">
+        <div id="mdl_player_results" class="search-results"></div>
       </div></div>
     <div id="newPlayerFields" class="hidden">
       <div class="field"><label>New Player Name</label><input id="mdl_new_player_name"></div>
@@ -922,30 +1106,34 @@ function showAddPlayer() {
       <button class="primary" onclick="submitAddPlayer()">Add</button>
     </div>
   `);
-  initSearchableSelect("setupPlayerTemplate", {
+  initSearchablePicker("setupPlayerTemplate", {
     searchInputId: "mdl_player_search",
-    selectId: "mdl_player_name",
+    resultsId: "mdl_player_results",
     options: templates.map((name) => ({
       value: name,
       label: name,
     })),
     allowCustom: true,
-    customValue: "",
-    customLabel: "-- new player --",
     selectedValue: templates[0] || "",
+    customLabelPrefix: "Create new player:",
+    emptyMessage: "No players found.",
     onChange: toggleNewPlayer,
   });
 }
 
 function toggleNewPlayer() {
-  const selectedValue = document.getElementById("mdl_player_name").value;
-  document.getElementById("newPlayerFields").classList.toggle("hidden", selectedValue !== "");
+  const selectedValue = getSearchableSelectedValue("setupPlayerTemplate");
+  const isNew = selectedValue === SEARCHABLE_CUSTOM_VALUE;
+  document.getElementById("newPlayerFields").classList.toggle("hidden", !isNew);
+  if (isNew) {
+    document.getElementById("mdl_new_player_name").value = getSearchableQuery("setupPlayerTemplate").trim();
+  }
 }
 
 async function submitAddPlayer() {
-  let name = document.getElementById("mdl_player_name").value;
+  let name = getSearchableSelectedValue("setupPlayerTemplate");
   let bonus = null;
-  if (!name) {
+  if (name === SEARCHABLE_CUSTOM_VALUE) {
     name = document.getElementById("mdl_new_player_name").value.trim();
     bonus = parseOptionalInteger("mdl_player_bonus");
   }

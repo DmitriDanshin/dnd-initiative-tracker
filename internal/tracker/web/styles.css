@@ -237,9 +237,64 @@ tr:hover {
   width: 100%;
 }
 
-.search-select {
+.search-picker {
   display: grid;
   gap: 8px;
+}
+
+.search-results {
+  display: grid;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.search-result,
+.search-empty {
+  width: 100%;
+  text-align: left;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.search-result {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid #2e3a59;
+}
+
+.search-result:hover {
+  background: rgba(233, 69, 96, 0.15);
+  border-color: var(--accent);
+}
+
+.search-result.active {
+  background: rgba(233, 69, 96, 0.18);
+  border-color: var(--accent);
+}
+
+.search-picker {
+  position: relative;
+}
+
+.search-picker input[type="search"] {
+  width: 100%;
+}
+
+.search-result.create-new {
+  border-style: dashed;
+}
+
+.search-result mark {
+  background: rgba(240, 192, 64, 0.3);
+  color: var(--text);
+  padding: 0 2px;
+  border-radius: 3px;
+}
+
+.search-empty {
+  color: var(--muted);
+  border: 1px dashed #2e3a59;
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .modal .btn-group {
