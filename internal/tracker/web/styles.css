@@ -305,6 +305,37 @@ tr:hover {
   min-height: 1em;
 }
 
+.hp-actions {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.icon-btn {
+  padding: 2px 6px;
+  font-size: 0.85rem;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 3px;
+  opacity: 0.7;
+}
+
+.icon-btn:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.icon-btn.damage {
+  color: var(--red);
+}
+
+.icon-btn.heal {
+  color: var(--green);
+}
+
 .hidden {
   display: none !important;
 }

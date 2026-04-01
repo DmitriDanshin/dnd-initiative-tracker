@@ -19,7 +19,10 @@ async function api(method, path, body) {
 async function load() {
   try {
     const page = currentPage();
-    if (page === "npcs") {
+    if (page === "saves") {
+      const data = await api("GET", "/api/encounters");
+      state = { mode: "saves", encounters: data.encounters || [], message: "" };
+    } else if (page === "npcs") {
       const data = await api("GET", "/api/npc-templates");
       state = { mode: "npcs", npc_templates_full: data.templates, message: data.message || "" };
     } else if (page === "players") {
@@ -27,6 +30,12 @@ async function load() {
       state = { mode: "players", player_templates_full: data.templates, message: data.message || "" };
     } else {
       state = await api("GET", "/api/state");
+      if (page === "combat" && !state.encounter) {
+        const encounterId = window.location.pathname.split("/").filter(Boolean)[1];
+        if (encounterId) {
+          state = await api("POST", "/api/resume-encounter", { encounter_id: decodeURIComponent(encounterId) });
+        }
+      }
     }
     render();
   } catch (error) {
@@ -112,6 +121,7 @@ function render() {
   const app = document.getElementById("app");
   const page = currentPage();
   if (page === "home") renderHome(app);
+  else if (page === "saves") renderSaves(app);
   else if (page === "setup") renderSetup(app);
   else if (page === "combat") renderCombat(app);
   else if (page === "npcs") renderNpcList(app);
@@ -120,25 +130,83 @@ function render() {
 
 function renderHome(app) {
   setTitle("Home");
-  const encounters = state.encounters || [];
+  const savesCount = (state.encounters || []).length;
   const npcCount = (state.npc_templates || []).length;
   const playerCount = (state.player_templates || []).length;
-  let list = "";
-  if (encounters.length) {
-    list = "<h2>Saved Encounters</h2><ul class=\"saves-list\">";
-    encounters.forEach((encounter) => {
-      list += "<li onclick=\"resumeEncounter('" + encounter.encounter_id + "')\">"
-        + encounter.encounter_name + " <span style=\"color:var(--muted)\">(round " + encounter.round + ")</span></li>";
-    });
-    list += "</ul>";
-  }
   app.innerHTML = `
     <div class="home-menu">
       <button class="primary" onclick="newEncounter()">New Encounter</button>
+      <button onclick="window.location.href='/saves'">Saves <span style="color:var(--muted)">(${savesCount})</span></button>
       <button onclick="window.location.href='/npcs'">NPCs <span style="color:var(--muted)">(${npcCount})</span></button>
       <button onclick="window.location.href='/players'">Players <span style="color:var(--muted)">(${playerCount})</span></button>
+    </div>`;
+}
+
+function renderSaves(app) {
+  setTitle("Saves");
+  const encounters = state.encounters || [];
+  let rows = "";
+  encounters.forEach((encounter) => {
+    const eid = escapeHtml(encounter.encounter_id);
+    rows += "<tr>"
+      + "<td onclick=\"resumeEncounter('" + eid + "')\" style=\"cursor:pointer\">" + escapeHtml(encounter.encounter_name) + "</td>"
+      + "<td>" + encounter.round + "</td>"
+      + "<td>" + escapeHtml(encounter.saved_at || "-") + "</td>"
+      + "<td>"
+      + "<button onclick=\"event.stopPropagation();showRenameSave('" + eid + "','" + escapeHtml(encounter.encounter_name) + "')\">Rename</button> "
+      + "<button class=\"danger\" onclick=\"event.stopPropagation();confirmDeleteSave('" + eid + "','" + escapeHtml(encounter.encounter_name) + "')\">Delete</button>"
+      + "</td>"
+      + "</tr>";
+  });
+  if (!rows) rows = "<tr><td colspan=\"4\" style=\"color:var(--muted)\">No saved encounters</td></tr>";
+  app.innerHTML = `
+    <div class="btn-group">
+      <button onclick="goHome()">Back</button>
     </div>
-    ${list}`;
+    <table>
+      <thead><tr><th>Encounter</th><th>Round</th><th>Saved</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function showRenameSave(encounterId, currentName) {
+  showModal(`
+    <h3>Rename Encounter</h3>
+    <div class="field"><label>Name</label><input id="mdl_rename_save" value="${currentName}"></div>
+    <div class="btn-group">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="primary" onclick="submitRenameSave('${encounterId}')">Save</button>
+    </div>
+  `);
+}
+
+async function submitRenameSave(encounterId) {
+  const name = document.getElementById("mdl_rename_save").value.trim();
+  if (!name) return;
+  closeModal();
+  const data = await api("POST", "/api/rename-encounter", { encounter_id: encounterId, name });
+  state.encounters = data.encounters || [];
+  state.message = data.message || "";
+  render();
+}
+
+function confirmDeleteSave(encounterId, name) {
+  showModal(`
+    <h3>Delete Encounter</h3>
+    <p>Are you sure you want to delete <strong>${name}</strong>?</p>
+    <div class="btn-group">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="danger" onclick="deleteSave('${encounterId}')">Delete</button>
+    </div>
+  `);
+}
+
+async function deleteSave(encounterId) {
+  closeModal();
+  const data = await api("POST", "/api/delete-encounter", { encounter_id: encounterId });
+  state.encounters = data.encounters || [];
+  state.message = data.message || "";
+  render();
 }
 
 function renderSetup(app) {
@@ -197,9 +265,15 @@ function renderCombat(app) {
     const initiative = combatant.initiative_total != null ? combatant.initiative_total : "-";
     const token = combatant.token_label || "-";
     const activeIcon = isActive ? "\u25B6 " : "";
-    rows += "<tr class=\"" + classes + "\" onclick=\"selectCombat(" + index + ")\">"
+    const hpActions = combatant.max_hp != null
+      ? " <span class=\"hp-actions\">"
+        + "<button class=\"icon-btn damage\" onclick=\"event.stopPropagation();showHpDelta(" + index + ",-1)\" title=\"Damage\">\u2694</button>"
+        + "<button class=\"icon-btn heal\" onclick=\"event.stopPropagation();showHpDelta(" + index + ",1)\" title=\"Heal\">\u2764</button>"
+        + "</span>"
+      : "";
+    rows += "<tr class=\"" + classes + "\" onclick=\"selectCombat(" + index + ")\" ondblclick=\"showEditCombatant(" + index + ")\">"
       + "<td>" + activeIcon + initiative + "</td><td>" + token + "</td><td>" + combatant.display_name + "</td>"
-      + "<td>" + hp + " " + hpBar + "</td><td>" + ac + "</td></tr>";
+      + "<td>" + hp + " " + hpActions + hpBar + "</td><td>" + ac + "</td></tr>";
   });
 
   let detail = "";
@@ -218,7 +292,6 @@ function renderCombat(app) {
   app.innerHTML = `
     <div class="btn-group">
       <button class="primary" onclick="nextTurn()">Next Turn</button>
-      <button onclick="showHpDelta()">HP +/-</button>
       <button onclick="showAddNpcCombat()">Add NPC</button>
       <button onclick="saveEncounter()">Save</button>
       <button onclick="goHome()">Back</button>
@@ -543,7 +616,8 @@ function resumeEncounter(encounterId) {
   window.location.href = getEncounterUrl(encounterId);
 }
 
-function goHome() {
+async function goHome() {
+  await api("POST", "/api/go-home");
   window.location.href = "/";
 }
 
@@ -773,29 +847,71 @@ async function saveEncounter() {
   await load();
 }
 
-function showHpDelta() {
+function showHpDelta(index, direction) {
   const encounter = state.encounter;
   if (!encounter || !encounter.combatants.length) return;
-  const combatant = encounter.combatants[state.selected_index];
+  const idx = index != null ? index : state.selected_index;
+  const combatant = encounter.combatants[idx];
   if (combatant.current_hp == null) {
     setMessage(combatant.display_name + " does not track HP.");
     return;
   }
+  const isDamage = direction != null ? direction < 0 : true;
+  const title = isDamage ? "Damage" : "Heal";
+  const icon = isDamage ? "\u2694" : "\u2764";
   showModal(`
-    <h3>HP Delta: ${combatant.display_name}</h3>
+    <h3>${icon} ${title}: ${escapeHtml(combatant.display_name)}</h3>
     <p>Current HP: ${combatant.current_hp}/${combatant.max_hp || "-"}</p>
-    <div class="field"><label>Delta (negative = damage)</label><input id="mdl_hp_delta" type="number" value="-1"></div>
+    <div class="field"><label>Amount</label><input id="mdl_hp_delta" type="number" min="0" value="1"></div>
     <div class="btn-group">
       <button onclick="closeModal()">Cancel</button>
-      <button class="primary" onclick="submitHpDelta()">Apply</button>
+      <button class="primary" onclick="submitHpDelta(${idx}, ${isDamage ? -1 : 1})">Apply</button>
     </div>
   `);
 }
 
-async function submitHpDelta() {
-  const delta = parseInt(document.getElementById("mdl_hp_delta").value, 10) || 0;
+async function submitHpDelta(index, sign) {
+  const amount = parseInt(document.getElementById("mdl_hp_delta").value, 10) || 0;
   closeModal();
-  await api("POST", "/api/hp-delta", { index: state.selected_index, delta });
+  await api("POST", "/api/hp-delta", { index, delta: amount * sign });
+  await load();
+}
+
+function showEditCombatant(indexOverride) {
+  const encounter = state.encounter;
+  if (!encounter || !encounter.combatants.length) return;
+  const index = indexOverride != null ? indexOverride : state.selected_index;
+  const c = encounter.combatants[index];
+  showModal(`
+    <h3>Edit: ${escapeHtml(c.display_name)}</h3>
+    <div class="field"><label>Display Name</label><input id="mdl_edit_name" value="${escapeHtml(c.display_name)}"></div>
+    <div class="field"><label>AC</label><input id="mdl_edit_ac" type="number" min="0" value="${c.ac != null ? c.ac : ""}"></div>
+    <div class="field"><label>Max HP</label><input id="mdl_edit_max_hp" type="number" min="0" value="${c.max_hp != null ? c.max_hp : ""}"></div>
+    <div class="field"><label>Current HP</label><input id="mdl_edit_current_hp" type="number" min="0" value="${c.current_hp != null ? c.current_hp : ""}"></div>
+    <div class="field"><label>Initiative</label><input id="mdl_edit_initiative" type="number" value="${c.initiative_total != null ? c.initiative_total : ""}"></div>
+    <div class="field"><label>Notes</label><textarea id="mdl_edit_notes">${escapeHtml(c.notes || "")}</textarea></div>
+    <div class="btn-group">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="primary" onclick="submitEditCombatant(${index})">Save</button>
+    </div>
+  `);
+}
+
+async function submitEditCombatant(index) {
+  const body = { index };
+  const name = document.getElementById("mdl_edit_name").value.trim();
+  if (name) body.display_name = name;
+  const ac = document.getElementById("mdl_edit_ac").value.trim();
+  if (ac !== "") body.ac = parseInt(ac, 10);
+  const maxHp = document.getElementById("mdl_edit_max_hp").value.trim();
+  if (maxHp !== "") body.max_hp = parseInt(maxHp, 10);
+  const currentHp = document.getElementById("mdl_edit_current_hp").value.trim();
+  if (currentHp !== "") body.current_hp = parseInt(currentHp, 10);
+  const initiative = document.getElementById("mdl_edit_initiative").value.trim();
+  if (initiative !== "") body.initiative_total = parseInt(initiative, 10);
+  body.notes = document.getElementById("mdl_edit_notes").value;
+  closeModal();
+  await api("POST", "/api/edit-combatant", body);
   await load();
 }
 
