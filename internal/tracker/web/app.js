@@ -66,6 +66,144 @@ function parseOptionalInteger(elementId) {
   return raw === "" ? null : parseInt(raw, 10);
 }
 
+const searchableSelects = {};
+
+function normalizeSearchText(value) {
+  return String(value ?? "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function fuzzyScoreOption(query, label) {
+  const normalizedQuery = normalizeSearchText(query);
+  const normalizedLabel = normalizeSearchText(label);
+  if (!normalizedQuery) return 0;
+  if (!normalizedLabel) return null;
+
+  if (normalizedLabel === normalizedQuery) {
+    return 5000;
+  }
+
+  if (normalizedLabel.startsWith(normalizedQuery)) {
+    return 4000 - (normalizedLabel.length - normalizedQuery.length);
+  }
+
+  const substringIndex = normalizedLabel.indexOf(normalizedQuery);
+  if (substringIndex >= 0) {
+    return 3000 - substringIndex * 10 - (normalizedLabel.length - normalizedQuery.length);
+  }
+
+  let searchIndex = 0;
+  let startIndex = -1;
+  let lastMatchIndex = -1;
+  let gapPenalty = 0;
+  let consecutiveBonus = 0;
+
+  for (let index = 0; index < normalizedLabel.length && searchIndex < normalizedQuery.length; index += 1) {
+    if (normalizedLabel[index] !== normalizedQuery[searchIndex]) continue;
+    if (startIndex === -1) startIndex = index;
+    if (lastMatchIndex >= 0) {
+      gapPenalty += index - lastMatchIndex - 1;
+      if (index === lastMatchIndex + 1) consecutiveBonus += 8;
+    }
+    lastMatchIndex = index;
+    searchIndex += 1;
+  }
+
+  if (searchIndex !== normalizedQuery.length) {
+    return null;
+  }
+
+  return 2000 - startIndex * 10 - gapPenalty * 3 + consecutiveBonus - (normalizedLabel.length - normalizedQuery.length);
+}
+
+function rankSearchableOptions(options, query) {
+  return options
+    .map((option, index) => ({ option, index, score: fuzzyScoreOption(query, option.label) }))
+    .filter((entry) => entry.score != null)
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      return left.index - right.index;
+    })
+    .map((entry) => entry.option);
+}
+
+function renderSearchableSelect(key) {
+  const config = searchableSelects[key];
+  if (!config) return;
+
+  const searchInput = document.getElementById(config.searchInputId);
+  const select = document.getElementById(config.selectId);
+  if (!searchInput || !select) return;
+
+  const query = searchInput.value || "";
+  const rankedOptions = rankSearchableOptions(config.options, query);
+  const previousValue = config.selectedValue ?? select.value ?? "";
+
+  select.innerHTML = "";
+  rankedOptions.forEach((optionData) => {
+    const option = document.createElement("option");
+    option.value = optionData.value;
+    option.textContent = optionData.label;
+    Object.entries(optionData.dataset || {}).forEach(([name, value]) => {
+      option.dataset[name] = value == null ? "" : String(value);
+    });
+    select.appendChild(option);
+  });
+
+  if (config.allowCustom) {
+    const option = document.createElement("option");
+    option.value = config.customValue ?? "";
+    option.textContent = config.customLabel;
+    select.appendChild(option);
+  }
+
+  const selectableValues = new Set(rankedOptions.map((option) => option.value));
+  if (config.allowCustom) {
+    selectableValues.add(config.customValue ?? "");
+  }
+
+  let nextValue = previousValue;
+  if (!selectableValues.has(nextValue)) {
+    if (rankedOptions.length > 0) {
+      nextValue = rankedOptions[0].value;
+    } else if (config.allowCustom) {
+      nextValue = config.customValue ?? "";
+    } else {
+      nextValue = "";
+    }
+  }
+
+  select.value = nextValue;
+  config.selectedValue = nextValue;
+
+  if (typeof config.onChange === "function") {
+    config.onChange(nextValue, rankedOptions, query);
+  }
+}
+
+function initSearchableSelect(key, config) {
+  searchableSelects[key] = { ...config, selectedValue: config.selectedValue };
+  renderSearchableSelect(key);
+}
+
+function updateSearchableSelect(key) {
+  renderSearchableSelect(key);
+}
+
+function handleSearchableSelectChange(key) {
+  const config = searchableSelects[key];
+  if (!config) return;
+  const select = document.getElementById(config.selectId);
+  if (!select) return;
+  config.selectedValue = select.value;
+  if (typeof config.onChange === "function") {
+    config.onChange(select.value, rankSearchableOptions(config.options, document.getElementById(config.searchInputId)?.value || ""), document.getElementById(config.searchInputId)?.value || "");
+  }
+}
+
 function setMessage(message) {
   document.getElementById("message").textContent = message || "";
 }
@@ -311,17 +449,14 @@ function showAddNpcCombat() {
     showAddNpcCombatNewOnly();
     return;
   }
-  const options = templates.map((template) => {
-    return "<option value=\"" + escapeHtml(template.name) + "\" data-hp=\"" + template.hp + "\" data-ac=\"" + template.ac + "\">" + escapeHtml(template.name) + "</option>";
-  }).join("");
   const first = templates[0] || { hp: "", ac: "" };
   showModal(`
     <h3>Add NPC to Combat</h3>
     <div class="field"><label>NPC Template</label>
-      <select id="mdl_combat_npc_name" onchange="onCombatNpcSelect()">
-        ${options}
-        <option value="">-- create new --</option>
-      </select></div>
+      <div class="search-select">
+        <input id="mdl_combat_npc_search" type="search" placeholder="Search NPC template" oninput="updateSearchableSelect('combatNpcTemplate')">
+        <select id="mdl_combat_npc_name" onchange="handleSearchableSelectChange('combatNpcTemplate')"></select>
+      </div></div>
     <div id="combatNpcExistingFields">
       <div class="field"><label>HP</label><input id="mdl_combat_npc_hp" type="number" value="${first.hp}" min="1"></div>
       <div class="field"><label>AC</label><input id="mdl_combat_npc_ac" type="number" value="${first.ac}" min="0"></div>
@@ -342,6 +477,20 @@ function showAddNpcCombat() {
       <button class="primary" onclick="submitAddNpcCombat()">Add</button>
     </div>
   `);
+  initSearchableSelect("combatNpcTemplate", {
+    searchInputId: "mdl_combat_npc_search",
+    selectId: "mdl_combat_npc_name",
+    options: templates.map((template) => ({
+      value: template.name,
+      label: template.name,
+      dataset: { hp: template.hp, ac: template.ac },
+    })),
+    allowCustom: true,
+    customValue: "",
+    customLabel: "-- create new --",
+    selectedValue: first.name || "",
+    onChange: onCombatNpcSelect,
+  });
 }
 
 function showAddNpcCombatNewOnly() {
@@ -364,6 +513,7 @@ function showAddNpcCombatNewOnly() {
 
 function onCombatNpcSelect() {
   const select = document.getElementById("mdl_combat_npc_name");
+  if (!select) return;
   const isNew = select.value === "";
   document.getElementById("combatNpcExistingFields").classList.toggle("hidden", isNew);
   document.getElementById("combatNpcNewFields").classList.toggle("hidden", !isNew);
@@ -642,17 +792,14 @@ function showAddNpc() {
     showAddNpcNewOnly();
     return;
   }
-  const options = templates.map((template) => {
-    return "<option value=\"" + escapeHtml(template.name) + "\" data-hp=\"" + template.hp + "\" data-ac=\"" + template.ac + "\">" + escapeHtml(template.name) + "</option>";
-  }).join("");
   const first = templates[0] || { hp: "", ac: "" };
   showModal(`
     <h3>Add NPC</h3>
     <div class="field"><label>NPC Template</label>
-      <select id="mdl_npc_name" onchange="onNpcSelect()">
-        ${options}
-        <option value="">-- create new --</option>
-      </select></div>
+      <div class="search-select">
+        <input id="mdl_npc_search" type="search" placeholder="Search NPC template" oninput="updateSearchableSelect('setupNpcTemplate')">
+        <select id="mdl_npc_name" onchange="handleSearchableSelectChange('setupNpcTemplate')"></select>
+      </div></div>
     <div id="setupNpcExistingFields">
       <div class="field"><label>HP</label><input id="mdl_npc_hp" type="number" value="${first.hp}" min="1"></div>
       <div class="field"><label>AC</label><input id="mdl_npc_ac" type="number" value="${first.ac}" min="0"></div>
@@ -673,6 +820,20 @@ function showAddNpc() {
       <button class="primary" onclick="submitAddNpc()">Add</button>
     </div>
   `);
+  initSearchableSelect("setupNpcTemplate", {
+    searchInputId: "mdl_npc_search",
+    selectId: "mdl_npc_name",
+    options: templates.map((template) => ({
+      value: template.name,
+      label: template.name,
+      dataset: { hp: template.hp, ac: template.ac },
+    })),
+    allowCustom: true,
+    customValue: "",
+    customLabel: "-- create new --",
+    selectedValue: first.name || "",
+    onChange: onNpcSelect,
+  });
 }
 
 function showAddNpcNewOnly() {
@@ -695,6 +856,7 @@ function showAddNpcNewOnly() {
 
 function onNpcSelect() {
   const select = document.getElementById("mdl_npc_name");
+  if (!select) return;
   const isNew = select.value === "";
   document.getElementById("setupNpcExistingFields").classList.toggle("hidden", isNew);
   document.getElementById("setupNpcNewFields").classList.toggle("hidden", !isNew);
@@ -743,12 +905,14 @@ async function submitAddNpcNew() {
 }
 
 function showAddPlayer() {
-  const templates = (state.player_templates || []).map((name) => "<option value=\"" + name + "\">" + name + "</option>").join("");
-  const newOption = "<option value=\"\">-- new player --</option>";
+  const templates = state.player_templates || [];
   showModal(`
     <h3>Add Player</h3>
     <div class="field"><label>Player</label>
-      <select id="mdl_player_name" onchange="toggleNewPlayer()">${templates}${newOption}</select></div>
+      <div class="search-select">
+        <input id="mdl_player_search" type="search" placeholder="Search player" oninput="updateSearchableSelect('setupPlayerTemplate')">
+        <select id="mdl_player_name" onchange="handleSearchableSelectChange('setupPlayerTemplate')"></select>
+      </div></div>
     <div id="newPlayerFields" class="hidden">
       <div class="field"><label>New Player Name</label><input id="mdl_new_player_name"></div>
       <div class="field"><label>Initiative Bonus (optional)</label><input id="mdl_player_bonus" type="number"></div>
@@ -758,6 +922,19 @@ function showAddPlayer() {
       <button class="primary" onclick="submitAddPlayer()">Add</button>
     </div>
   `);
+  initSearchableSelect("setupPlayerTemplate", {
+    searchInputId: "mdl_player_search",
+    selectId: "mdl_player_name",
+    options: templates.map((name) => ({
+      value: name,
+      label: name,
+    })),
+    allowCustom: true,
+    customValue: "",
+    customLabel: "-- new player --",
+    selectedValue: templates[0] || "",
+    onChange: toggleNewPlayer,
+  });
 }
 
 function toggleNewPlayer() {

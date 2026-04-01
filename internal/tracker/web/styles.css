@@ -237,6 +237,11 @@ tr:hover {
   width: 100%;
 }
 
+.search-select {
+  display: grid;
+  gap: 8px;
+}
+
 .modal .btn-group {
   margin-top: 16px;
   justify-content: flex-end;
